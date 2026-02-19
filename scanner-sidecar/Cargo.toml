@@ -1,0 +1,26 @@
+[package]
+name = "scanner-sidecar"
+version = "0.1.0"
+edition = "2021"
+description = "32-bit TWAIN scanner sidecar for legacy driver support"
+
+[[bin]]
+name = "twain-scanner-32bit"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+libloading = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_Graphics_Gdi",
+] }

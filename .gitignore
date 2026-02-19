@@ -1,0 +1,40 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Tauri
+/src-tauri/target/
+/src-tauri/WixTools/
+/src-tauri/binaries/*.exe
+/src-tauri/binaries/twain-scanner-32bit-*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment / Secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Build artifacts
+*.msi
+*.nsis
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Debug
+*.pdb
+*.dSYM/
