@@ -245,3 +245,90 @@ pub enum PdfError {
     #[error("PDF write error: {0}")]
     WriteError(String),
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a minimal valid PNG for testing (1x1 red pixel)
+    fn make_test_png(width: u32, height: u32) -> Vec<u8> {
+        use image::ImageEncoder;
+        let mut buf = Vec::new();
+        let cursor = std::io::Cursor::new(&mut buf);
+        let encoder = image::codecs::png::PngEncoder::new(cursor);
+        // RGB image: 3 bytes per pixel
+        let pixels: Vec<u8> = (0..width * height)
+            .flat_map(|_| vec![255u8, 0, 0]) // red
+            .collect();
+        encoder
+            .write_image(&pixels, width, height, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        buf
+    }
+
+    #[test]
+    fn generate_pdf_empty_pages_errors() {
+        let result = generate_pdf(&[]);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), PdfError::NoPages));
+    }
+
+    #[test]
+    fn generate_pdf_single_page() {
+        let png = make_test_png(100, 200);
+        let result = generate_pdf(&[png]);
+        assert!(result.is_ok());
+
+        let pdf_bytes = result.unwrap();
+        // Verify PDF header
+        assert!(pdf_bytes.starts_with(b"%PDF-1.4"));
+        // Verify PDF trailer
+        let trailer = String::from_utf8_lossy(&pdf_bytes);
+        assert!(trailer.contains("%%EOF"));
+        // Verify it contains page count
+        assert!(trailer.contains("/Count 1"));
+    }
+
+    #[test]
+    fn generate_pdf_multiple_pages() {
+        let pages: Vec<Vec<u8>> = (0..3).map(|_| make_test_png(50, 50)).collect();
+        let result = generate_pdf(&pages);
+        assert!(result.is_ok());
+
+        let pdf_bytes = result.unwrap();
+        let text = String::from_utf8_lossy(&pdf_bytes);
+        assert!(text.contains("/Count 3"));
+        // Should have 3 image XObjects
+        assert!(text.contains("/Subtype /Image"));
+    }
+
+    #[test]
+    fn generate_pdf_contains_valid_xref() {
+        let png = make_test_png(10, 10);
+        let pdf_bytes = generate_pdf(&[png]).unwrap();
+        let text = String::from_utf8_lossy(&pdf_bytes);
+        assert!(text.contains("xref"));
+        assert!(text.contains("startxref"));
+        assert!(text.contains("trailer"));
+    }
+
+    #[test]
+    fn generate_pdf_invalid_image_errors() {
+        let not_a_png = vec![0u8, 1, 2, 3, 4, 5];
+        let result = generate_pdf(&[not_a_png]);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), PdfError::ImageDecode(_)));
+    }
+
+    #[test]
+    fn generate_pdf_output_is_nonzero_size() {
+        let png = make_test_png(10, 10);
+        let pdf_bytes = generate_pdf(&[png]).unwrap();
+        // A valid single-page PDF should be at least a few hundred bytes
+        assert!(pdf_bytes.len() > 100);
+    }
+}

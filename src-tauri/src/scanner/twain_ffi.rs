@@ -515,3 +515,189 @@ pub fn tw_str255_to_string(s: &TW_STR255) -> String {
     let end = s.iter().position(|&c| c == 0).unwrap_or(s.len());
     s[..end].iter().map(|&c| c as u8 as char).collect()
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem;
+
+    // ---- Struct size/alignment tests ----
+    // These ensure our #[repr(C)] structs match the C ABI.
+    // Sizes are for 64-bit targets (pointers = 8 bytes).
+
+    #[test]
+    fn tw_fix32_size() {
+        assert_eq!(mem::size_of::<TW_FIX32>(), 4);
+    }
+
+    #[test]
+    fn tw_frame_size() {
+        assert_eq!(mem::size_of::<TW_FRAME>(), 16);
+    }
+
+    #[test]
+    fn tw_version_size() {
+        // 4 x u16 (8) + TW_STR32 (34) = 42, padded to 42
+        assert_eq!(mem::size_of::<TW_VERSION>(), 42);
+    }
+
+    #[test]
+    fn tw_onevalue_size() {
+        // u16 (2) + padding (2) + u32 (4) = 8
+        assert_eq!(mem::size_of::<TW_ONEVALUE>(), 8);
+    }
+
+    #[test]
+    fn tw_range_size() {
+        // u16 (2) + pad (2) + 5 x u32 (20) = 24
+        assert_eq!(mem::size_of::<TW_RANGE>(), 24);
+    }
+
+    #[test]
+    fn tw_setupmemxfer_size() {
+        assert_eq!(mem::size_of::<TW_SETUPMEMXFER>(), 12);
+    }
+
+    #[test]
+    fn tw_pendingxfers_size() {
+        // u16 (2) + pad (2) + u32 (4) = 8
+        assert_eq!(mem::size_of::<TW_PENDINGXFERS>(), 8);
+    }
+
+    #[test]
+    fn tw_status_size() {
+        assert_eq!(mem::size_of::<TW_STATUS>(), 4);
+    }
+
+    #[test]
+    fn tw_imageinfo_size() {
+        // 2xFIX32 (8) + 2xi32 (8) + i16 (2) + 8xi16 (16) + i16 (2) + u16(Planar) (2) + i16 (2) + u16 (2) = 42
+        // + 2 bytes trailing padding for alignment = 44
+        assert_eq!(mem::size_of::<TW_IMAGEINFO>(), 44);
+    }
+
+    // ---- TW_FIX32 conversion tests ----
+
+    #[test]
+    fn fix32_round_trip_integer() {
+        let fix = TW_FIX32::from_f32(300.0);
+        assert_eq!(fix.Whole, 300);
+        assert_eq!(fix.Frac, 0);
+        assert!((fix.to_f32() - 300.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn fix32_round_trip_fractional() {
+        let fix = TW_FIX32::from_f32(72.5);
+        assert_eq!(fix.Whole, 72);
+        assert!((fix.to_f32() - 72.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn fix32_round_trip_dpi_values() {
+        for dpi in [75.0f32, 100.0, 150.0, 200.0, 300.0, 600.0, 1200.0] {
+            let fix = TW_FIX32::from_f32(dpi);
+            let back = fix.to_f32();
+            assert!(
+                (back - dpi).abs() < 0.01,
+                "DPI {} round-tripped to {}",
+                dpi,
+                back
+            );
+        }
+    }
+
+    #[test]
+    fn fix32_zero() {
+        let fix = TW_FIX32::from_f32(0.0);
+        assert_eq!(fix.Whole, 0);
+        assert_eq!(fix.Frac, 0);
+        assert_eq!(fix.to_f32(), 0.0);
+    }
+
+    // ---- String conversion tests ----
+
+    #[test]
+    fn str32_round_trip() {
+        let original = "Test Scanner";
+        let tw = str_to_tw_str32(original);
+        let back = tw_str32_to_string(&tw);
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn str32_truncation() {
+        // TW_STR32 holds max 33 chars + null
+        let long = "A".repeat(50);
+        let tw = str_to_tw_str32(&long);
+        let back = tw_str32_to_string(&tw);
+        assert_eq!(back.len(), 33);
+    }
+
+    #[test]
+    fn str32_empty() {
+        let tw = str_to_tw_str32("");
+        let back = tw_str32_to_string(&tw);
+        assert_eq!(back, "");
+    }
+
+    #[test]
+    fn str255_round_trip() {
+        let original = "HP LaserJet Pro MFP M428fdw TWAIN";
+        let tw = str_to_tw_str255(original);
+        let back = tw_str255_to_string(&tw);
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn str255_truncation() {
+        let long = "B".repeat(300);
+        let tw = str_to_tw_str255(&long);
+        let back = tw_str255_to_string(&tw);
+        assert_eq!(back.len(), 255);
+    }
+
+    // ---- Default value tests ----
+
+    #[test]
+    fn identity_default_is_zeroed() {
+        let id = TW_IDENTITY::default();
+        assert_eq!(id.Id, 0);
+        assert_eq!(id.ProtocolMajor, 0);
+        assert_eq!(id.SupportedGroups, 0);
+        assert_eq!(tw_str32_to_string(&id.ProductName), "");
+    }
+
+    #[test]
+    fn imageinfo_default_is_zeroed() {
+        let info = TW_IMAGEINFO::default();
+        assert_eq!(info.ImageWidth, 0);
+        assert_eq!(info.ImageLength, 0);
+        assert_eq!(info.BitsPerPixel, 0);
+        assert_eq!(info.XResolution.to_f32(), 0.0);
+    }
+
+    // ---- Constant value tests ----
+
+    #[test]
+    fn constants_match_twain_spec() {
+        assert_eq!(DG_CONTROL, 0x0001);
+        assert_eq!(DG_IMAGE, 0x0002);
+        assert_eq!(MSG_OPENDSM, 0x0301);
+        assert_eq!(MSG_CLOSEDSM, 0x0302);
+        assert_eq!(MSG_OPENDS, 0x0401);
+        assert_eq!(MSG_ENABLEDS, 0x0502);
+        assert_eq!(MSG_XFERREADY, 0x0101);
+        assert_eq!(TWRC_SUCCESS, 0);
+        assert_eq!(TWRC_XFERDONE, 6);
+        assert_eq!(ICAP_XRESOLUTION, 0x1118);
+        assert_eq!(ICAP_YRESOLUTION, 0x1119);
+        assert_eq!(TWPT_BW, 0);
+        assert_eq!(TWPT_GRAY, 1);
+        assert_eq!(TWPT_RGB, 2);
+    }
+}
