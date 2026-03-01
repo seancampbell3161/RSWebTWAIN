@@ -11,10 +11,10 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use scan_agent_lib::ws_server::{self, WsServerConfig};
+use scan_agent_lib::ws_server::{self, WsServerConfig, DEFAULT_WS_PORT};
 use tauri::Manager;
 use tauri::tray::TrayIconBuilder;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 fn main() {
     // Initialize logging
@@ -119,20 +119,31 @@ fn main() {
             }
 
             // --- WebSocket Server ---
+            let port: u16 = match std::env::var("SCAN_AGENT_PORT") {
+                Ok(val) => match val.parse() {
+                    Ok(p) => {
+                        info!("Using custom port from SCAN_AGENT_PORT: {}", p);
+                        p
+                    }
+                    Err(_) => {
+                        warn!("Invalid SCAN_AGENT_PORT '{}', using default {}", val, DEFAULT_WS_PORT);
+                        DEFAULT_WS_PORT
+                    }
+                },
+                Err(_) => DEFAULT_WS_PORT,
+            };
+
             let _app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let config = WsServerConfig {
-                    port: ws_server::DEFAULT_WS_PORT,
+                    port,
                     allowed_origins: Vec::new(), // Allow all in dev; configure for production
                     auth_token,
                 };
 
                 match ws_server::start_server(config).await {
                     Ok(handle) => {
-                        info!(
-                            "WebSocket server started on port {}",
-                            ws_server::DEFAULT_WS_PORT
-                        );
+                        info!("WebSocket server started on port {}", port);
 
                         // Start the command handler
                         scan_agent_lib::command_handler(handle.command_rx, handle.event_tx).await;

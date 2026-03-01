@@ -97,6 +97,9 @@ pub async fn start_server(config: WsServerConfig) -> Result<WsServerHandle, Box<
                 }
                 _ = shutdown_rx.recv() => {
                     info!("WebSocket server shutting down");
+                    // Notify connected clients before exiting
+                    let _ = event_tx_clone.send(AgentMessage::ServerShutdown);
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     break;
                 }
             }
@@ -147,6 +150,7 @@ async fn handle_connection(
     let (close_tx, _) = watch::channel(false);
     let mut close_rx_resp = close_tx.subscribe();
     let mut close_rx_evt = close_tx.subscribe();
+    let mut close_rx_ping = close_tx.subscribe();
 
     // Forward direct responses to this client
     let response_task = tokio::spawn(async move {
@@ -195,6 +199,24 @@ async fn handle_connection(
         }
     });
 
+    // Server-side heartbeat: send WebSocket pings every 30s to detect dead connections
+    let ws_tx_ping = ws_tx.clone();
+    let ping_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.tick().await; // consume the immediate first tick
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let mut tx = ws_tx_ping.lock().await;
+                    if tx.send(Message::Ping(vec![].into())).await.is_err() {
+                        break;
+                    }
+                }
+                _ = close_rx_ping.changed() => break,
+            }
+        }
+    });
+
     // Read incoming messages from this client
     while let Some(msg_result) = ws_rx.next().await {
         match msg_result {
@@ -239,9 +261,10 @@ async fn handle_connection(
 
     // Signal per-connection tasks to shut down cooperatively
     let _ = close_tx.send(true);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let _ = response_task.await;
         let _ = event_task.await;
+        let _ = ping_task.await;
     })
     .await;
 
@@ -282,7 +305,7 @@ fn validate_handshake(
         let provided = req.uri().query().and_then(parse_token_from_query);
 
         match provided {
-            Some(token) if token == expected => {}
+            Some(ref token) if token == expected => {}
             _ => {
                 warn!("Rejected connection: invalid or missing auth token");
                 let reject = tokio_tungstenite::tungstenite::http::Response::builder()
@@ -297,14 +320,50 @@ fn validate_handshake(
     Ok(resp)
 }
 
-/// Extract `token` value from a URI query string (e.g., "token=abc&foo=bar" -> "abc").
-fn parse_token_from_query(query: &str) -> Option<&str> {
+/// Extract and percent-decode the `token` value from a URI query string.
+fn parse_token_from_query(query: &str) -> Option<String> {
     query.split('&').find_map(|pair| {
         let (key, value) = pair.split_once('=')?;
         if key == "token" {
-            Some(value)
+            Some(percent_decode(value))
         } else {
             None
         }
     })
+}
+
+/// Decode percent-encoded characters in a string (e.g., "%2F" -> "/").
+fn percent_decode(input: &str) -> String {
+    let mut out = Vec::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Some(b) = from_hex(bytes[i + 1], bytes[i + 2]) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Decode a pair of hex digits into a byte.
+fn from_hex(hi: u8, lo: u8) -> Option<u8> {
+    let h = match hi {
+        b'0'..=b'9' => hi - b'0',
+        b'a'..=b'f' => hi - b'a' + 10,
+        b'A'..=b'F' => hi - b'A' + 10,
+        _ => return None,
+    };
+    let l = match lo {
+        b'0'..=b'9' => lo - b'0',
+        b'a'..=b'f' => lo - b'a' + 10,
+        b'A'..=b'F' => lo - b'A' + 10,
+        _ => return None,
+    };
+    Some(h << 4 | l)
 }

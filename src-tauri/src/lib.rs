@@ -77,9 +77,19 @@ async fn handle_command(
         }
 
         ClientMessage::ListScanners { id } => {
-            let mut orch = state.orchestrator.lock().await;
-            match orch.discover_scanners() {
-                Ok(scanners) => {
+            let state_for_blocking = state.clone();
+            let discover_result = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                tokio::task::spawn_blocking(move || {
+                    let rt = tokio::runtime::Handle::current();
+                    let mut orch = rt.block_on(state_for_blocking.orchestrator.lock());
+                    orch.discover_scanners()
+                }),
+            )
+            .await;
+
+            match discover_result {
+                Ok(Ok(Ok(scanners))) => {
                     let entries = scanners
                         .into_iter()
                         .map(|s| protocol::ScannerListEntry {
@@ -94,12 +104,28 @@ async fn handle_command(
                         scanners: entries,
                     });
                 }
-                Err(e) => {
+                Ok(Ok(Err(e))) => {
                     error!("Failed to list scanners: {}", e);
                     let _ = response_tx.send(AgentMessage::Error {
                         id,
                         code: error_to_code(&e),
                         message: e.to_string(),
+                    });
+                }
+                Ok(Err(join_err)) => {
+                    error!("Scanner discovery task panicked: {}", join_err);
+                    let _ = response_tx.send(AgentMessage::Error {
+                        id,
+                        code: ErrorCode::InternalError,
+                        message: "Scanner discovery task failed".to_string(),
+                    });
+                }
+                Err(_) => {
+                    warn!("Scanner discovery timed out after 15s");
+                    let _ = response_tx.send(AgentMessage::Error {
+                        id,
+                        code: ErrorCode::DiscoveryTimeout,
+                        message: "Scanner discovery timed out".to_string(),
                     });
                 }
             }
@@ -206,6 +232,8 @@ fn error_to_code(e: &scanner::ScanError) -> ErrorCode {
         scanner::ScanError::NoScanners => ErrorCode::NoScannersAvailable,
         scanner::ScanError::ScannerNotFound(_) => ErrorCode::ScannerNotFound,
         scanner::ScanError::Cancelled => ErrorCode::ScanCancelled,
+        scanner::ScanError::ImageConversion(_) => ErrorCode::ImageConversionError,
+        scanner::ScanError::PdfGeneration(_) => ErrorCode::PdfGenerationError,
         scanner::ScanError::Twain(scanner::twain::TwainError::PaperJam) => ErrorCode::PaperJam,
         scanner::ScanError::Twain(scanner::twain::TwainError::PaperDoubleFeed) => {
             ErrorCode::PaperDoubleFeed
@@ -213,6 +241,10 @@ fn error_to_code(e: &scanner::ScanError) -> ErrorCode {
         scanner::ScanError::Twain(scanner::twain::TwainError::DsmLoadFailed(_)) => {
             ErrorCode::TwainNotInstalled
         }
-        _ => ErrorCode::InternalError,
+        scanner::ScanError::Twain(scanner::twain::TwainError::CapabilityNotSupported(_)) => {
+            ErrorCode::CapabilityNotSupported
+        }
+        scanner::ScanError::Sidecar(_) => ErrorCode::InternalError,
+        scanner::ScanError::Twain(_) => ErrorCode::InternalError,
     }
 }

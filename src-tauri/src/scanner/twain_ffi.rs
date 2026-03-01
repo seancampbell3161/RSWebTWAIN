@@ -508,12 +508,14 @@ pub fn str_to_tw_str255(s: &str) -> TW_STR255 {
 
 pub fn tw_str32_to_string(s: &TW_STR32) -> String {
     let end = s.iter().position(|&c| c == 0).unwrap_or(s.len());
-    s[..end].iter().map(|&c| c as u8 as char).collect()
+    let bytes: Vec<u8> = s[..end].iter().map(|&c| c as u8).collect();
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 pub fn tw_str255_to_string(s: &TW_STR255) -> String {
     let end = s.iter().position(|&c| c == 0).unwrap_or(s.len());
-    s[..end].iter().map(|&c| c as u8 as char).collect()
+    let bytes: Vec<u8> = s[..end].iter().map(|&c| c as u8).collect();
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 // ---------------------------------------------------------------------------

@@ -106,6 +106,7 @@ pub enum AgentMessage {
     Pong {
         id: String,
     },
+    ServerShutdown,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -145,6 +146,10 @@ pub enum ErrorCode {
     NoScannersAvailable,
     InternalError,
     InvalidRequest,
+    CapabilityNotSupported,
+    DiscoveryTimeout,
+    ImageConversionError,
+    PdfGenerationError,
 }
 
 // ---------------------------------------------------------------------------
@@ -356,6 +361,10 @@ mod tests {
             (ErrorCode::TwainNotInstalled, "TWAIN_NOT_INSTALLED"),
             (ErrorCode::NoScannersAvailable, "NO_SCANNERS_AVAILABLE"),
             (ErrorCode::InternalError, "INTERNAL_ERROR"),
+            (ErrorCode::CapabilityNotSupported, "CAPABILITY_NOT_SUPPORTED"),
+            (ErrorCode::DiscoveryTimeout, "DISCOVERY_TIMEOUT"),
+            (ErrorCode::ImageConversionError, "IMAGE_CONVERSION_ERROR"),
+            (ErrorCode::PdfGenerationError, "PDF_GENERATION_ERROR"),
         ];
         for (code, expected) in codes {
             let json = serde_json::to_string(&code).unwrap();

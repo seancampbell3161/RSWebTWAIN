@@ -271,7 +271,7 @@ pub async fn execute_native_scan(
 
     // TWAIN operations must happen on a dedicated thread (not a tokio task)
     // because TWAIN uses Windows message pumping which blocks
-    let (page_tx, mut page_rx) = mpsc::unbounded_channel::<PageData>();
+    let (page_tx, mut page_rx) = mpsc::channel::<PageData>(4);
 
     let scan_thread = std::thread::spawn(move || -> Result<(), ScanError> {
         let pre = twain::PreSession::new();
@@ -311,7 +311,7 @@ pub async fn execute_native_scan(
                                 dpi_y: page.y_resolution,
                                 raw_data: page.data,
                             };
-                            let _ = page_tx.send(page_data);
+                            let _ = page_tx.blocking_send(page_data);
                             page_num += 1;
                             current_transfer = next;
                         }
@@ -325,7 +325,7 @@ pub async fn execute_native_scan(
                                 dpi_y: page.y_resolution,
                                 raw_data: page.data,
                             };
-                            let _ = page_tx.send(page_data);
+                            let _ = page_tx.blocking_send(page_data);
 
                             // Close source cleanly
                             let dsm = source.close()?;
@@ -352,6 +352,9 @@ pub async fn execute_native_scan(
         // Check for cancellation before processing
         if cancel_flag.load(Ordering::Acquire) {
             info!("Page processing cancelled for scan {}", scan_id);
+            // Drain buffered pages to free memory and unblock scan thread
+            page_rx.close();
+            while page_rx.try_recv().is_ok() {}
             break;
         }
 
