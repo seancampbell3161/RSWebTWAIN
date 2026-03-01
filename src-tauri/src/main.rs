@@ -14,6 +14,7 @@
 use scan_agent_lib::ws_server::{self, WsServerConfig, DEFAULT_WS_PORT};
 use tauri::Manager;
 use tauri::tray::TrayIconBuilder;
+use tauri_plugin_autostart::ManagerExt;
 use tracing::{error, info, warn};
 
 fn main() {
@@ -78,7 +79,14 @@ fn main() {
                 &[&status, &separator, &autostart_toggle, &about, &separator, &quit],
             )?;
 
-            let _tray = TrayIconBuilder::new()
+            // Set initial autostart label to reflect current state
+            let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
+            if autostart_enabled {
+                let _ = autostart_toggle.set_text("✓ Start with Windows");
+            }
+
+            let autostart_item = autostart_toggle.clone();
+            let _tray = TrayIconBuilder::with_id("main")
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .tooltip("Scan Agent - Ready")
@@ -91,8 +99,23 @@ fn main() {
                         app.exit(0);
                     }
                     "autostart" => {
-                        info!("Autostart toggle requested");
-                        // TODO: Toggle autostart via tauri_plugin_autostart
+                        let manager = app.autolaunch();
+                        let currently_enabled = manager.is_enabled().unwrap_or(false);
+                        if currently_enabled {
+                            if let Err(e) = manager.disable() {
+                                error!("Failed to disable autostart: {}", e);
+                            } else {
+                                info!("Autostart disabled");
+                                let _ = autostart_item.set_text("Start with Windows");
+                            }
+                        } else {
+                            if let Err(e) = manager.enable() {
+                                error!("Failed to enable autostart: {}", e);
+                            } else {
+                                info!("Autostart enabled");
+                                let _ = autostart_item.set_text("✓ Start with Windows");
+                            }
+                        }
                     }
                     "about" => {
                         info!("About requested");
@@ -146,11 +169,38 @@ fn main() {
                 Err(_) => DEFAULT_WS_PORT,
             };
 
+            // --- Allowed Origins ---
+            let allowed_origins: Vec<String> = if cfg!(debug_assertions) {
+                // In debug mode, allow all origins for easier development
+                Vec::new()
+            } else {
+                match std::env::var("SCAN_AGENT_ALLOWED_ORIGINS") {
+                    Ok(val) => {
+                        let origins: Vec<String> = val
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        info!("Allowed origins from SCAN_AGENT_ALLOWED_ORIGINS: {:?}", origins);
+                        origins
+                    }
+                    Err(_) => {
+                        // Production defaults — update these to match your deployment
+                        let defaults = vec![
+                            "https://your-app.example.com".to_string(),
+                            "https://localhost:4200".to_string(),
+                        ];
+                        info!("Using default allowed origins: {:?}", defaults);
+                        defaults
+                    }
+                }
+            };
+
             let _app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let config = WsServerConfig {
                     port,
-                    allowed_origins: Vec::new(), // Allow all in dev; configure for production
+                    allowed_origins,
                     auth_token,
                 };
 
