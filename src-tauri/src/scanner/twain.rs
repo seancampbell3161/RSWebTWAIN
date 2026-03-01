@@ -282,11 +282,11 @@ impl PreSession {
         info!("TWAINDSM.dll loaded successfully");
 
         Ok(DsmLoaded {
-            handle: DsmHandle {
+            handle: Some(DsmHandle {
                 _library: library,
                 entry,
                 app_identity,
-            },
+            }),
         })
     }
 
@@ -303,7 +303,16 @@ impl PreSession {
 // ---------------------------------------------------------------------------
 
 pub struct DsmLoaded {
-    handle: DsmHandle,
+    handle: Option<DsmHandle>,
+}
+
+impl Drop for DsmLoaded {
+    fn drop(&mut self) {
+        if let Some(_handle) = self.handle.take() {
+            debug!("DsmLoaded dropped — DSM library will unload");
+            // DsmHandle drops here, unloading the library
+        }
+    }
 }
 
 impl DsmLoaded {
@@ -314,8 +323,10 @@ impl DsmLoaded {
     pub fn open_dsm(mut self, hwnd: isize) -> TwainResult<DsmOpened> {
         info!("Opening TWAIN DSM");
 
+        let mut handle = self.handle.take().expect("DsmLoaded: handle already consumed");
+
         unsafe {
-            self.handle.call_checked(
+            handle.call_checked(
                 ptr::null_mut(),
                 DG_CONTROL,
                 DAT_PARENT,
@@ -326,7 +337,7 @@ impl DsmLoaded {
 
         info!("TWAIN DSM opened");
         Ok(DsmOpened {
-            handle: self.handle,
+            handle: Some(handle),
             hwnd,
         })
     }
@@ -337,19 +348,37 @@ impl DsmLoaded {
 // ---------------------------------------------------------------------------
 
 pub struct DsmOpened {
-    handle: DsmHandle,
+    handle: Option<DsmHandle>,
     hwnd: isize,
+}
+
+impl Drop for DsmOpened {
+    fn drop(&mut self) {
+        if let Some(mut handle) = self.handle.take() {
+            warn!("DsmOpened dropped without clean close — closing DSM");
+            unsafe {
+                let _ = handle.call_checked(
+                    ptr::null_mut(),
+                    DG_CONTROL,
+                    DAT_PARENT,
+                    MSG_CLOSEDSM,
+                    self.hwnd as TW_MEMREF,
+                );
+            }
+        }
+    }
 }
 
 impl DsmOpened {
     /// List all available TWAIN data sources
     pub fn list_sources(&mut self) -> TwainResult<Vec<SourceInfo>> {
+        let handle = self.handle.as_mut().expect("DsmOpened: no handle");
         let mut sources = Vec::new();
         let mut identity = TW_IDENTITY::default();
 
         // Get first source
         let rc = unsafe {
-            self.handle.call(
+            handle.call(
                 ptr::null_mut(),
                 DG_CONTROL,
                 DAT_IDENTITY,
@@ -365,7 +394,7 @@ impl DsmOpened {
             loop {
                 identity = TW_IDENTITY::default();
                 let rc = unsafe {
-                    self.handle.call(
+                    handle.call(
                         ptr::null_mut(),
                         DG_CONTROL,
                         DAT_IDENTITY,
@@ -387,10 +416,11 @@ impl DsmOpened {
 
     /// Get the default data source
     pub fn get_default_source(&mut self) -> TwainResult<TW_IDENTITY> {
+        let handle = self.handle.as_mut().expect("DsmOpened: no handle");
         let mut identity = TW_IDENTITY::default();
 
         unsafe {
-            self.handle.call_checked(
+            handle.call_checked(
                 ptr::null_mut(),
                 DG_CONTROL,
                 DAT_IDENTITY,
@@ -417,8 +447,10 @@ impl DsmOpened {
 
         info!("Opening data source: {}", source.name);
 
+        let mut handle = self.handle.take().expect("DsmOpened: handle already consumed");
+
         unsafe {
-            self.handle.call_checked(
+            handle.call_checked(
                 ptr::null_mut(),
                 DG_CONTROL,
                 DAT_IDENTITY,
@@ -430,7 +462,7 @@ impl DsmOpened {
         info!("Data source opened: {}", source.name);
 
         Ok(SourceOpened {
-            handle: self.handle,
+            handle: Some(handle),
             hwnd: self.hwnd,
             source_identity: identity,
         })
@@ -443,8 +475,10 @@ impl DsmOpened {
 
         info!("Opening default data source: {}", name);
 
+        let mut handle = self.handle.take().expect("DsmOpened: handle already consumed");
+
         unsafe {
-            self.handle.call_checked(
+            handle.call_checked(
                 ptr::null_mut(),
                 DG_CONTROL,
                 DAT_IDENTITY,
@@ -456,7 +490,7 @@ impl DsmOpened {
         info!("Default data source opened: {}", name);
 
         Ok(SourceOpened {
-            handle: self.handle,
+            handle: Some(handle),
             hwnd: self.hwnd,
             source_identity: identity,
         })
@@ -465,8 +499,9 @@ impl DsmOpened {
     /// Close the DSM (transition back to State 2, consuming self)
     pub fn close_dsm(mut self) -> TwainResult<DsmLoaded> {
         info!("Closing TWAIN DSM");
+        let mut handle = self.handle.take().expect("DsmOpened: handle already consumed");
         unsafe {
-            self.handle.call_checked(
+            handle.call_checked(
                 ptr::null_mut(),
                 DG_CONTROL,
                 DAT_PARENT,
@@ -475,7 +510,7 @@ impl DsmOpened {
             )?;
         }
         Ok(DsmLoaded {
-            handle: self.handle,
+            handle: Some(handle),
         })
     }
 }
@@ -485,9 +520,33 @@ impl DsmOpened {
 // ---------------------------------------------------------------------------
 
 pub struct SourceOpened {
-    handle: DsmHandle,
+    handle: Option<DsmHandle>,
     hwnd: isize,
     source_identity: TW_IDENTITY,
+}
+
+impl Drop for SourceOpened {
+    fn drop(&mut self) {
+        if let Some(mut handle) = self.handle.take() {
+            warn!("SourceOpened dropped without clean close — closing source then DSM");
+            unsafe {
+                let _ = handle.call_checked(
+                    ptr::null_mut(),
+                    DG_CONTROL,
+                    DAT_IDENTITY,
+                    MSG_CLOSEDS,
+                    &mut self.source_identity as *mut TW_IDENTITY as TW_MEMREF,
+                );
+                let _ = handle.call_checked(
+                    ptr::null_mut(),
+                    DG_CONTROL,
+                    DAT_PARENT,
+                    MSG_CLOSEDSM,
+                    self.hwnd as TW_MEMREF,
+                );
+            }
+        }
+    }
 }
 
 impl SourceOpened {
@@ -528,6 +587,7 @@ impl SourceOpened {
 
     /// Set a u16 capability value
     fn set_capability_u16(&mut self, cap: TW_UINT16, value: TW_UINT16) {
+        let handle = self.handle.as_mut().expect("SourceOpened: no handle");
         let one_value = TW_ONEVALUE {
             ItemType: 4, // TWTY_UINT16
             Item: value as TW_UINT32,
@@ -542,7 +602,7 @@ impl SourceOpened {
         };
 
         let result = unsafe {
-            self.handle.call(
+            handle.call(
                 &mut self.source_identity as *mut TW_IDENTITY,
                 DG_CONTROL,
                 DAT_CAPABILITY,
@@ -570,6 +630,7 @@ impl SourceOpened {
 
     /// Set an i16 capability value (e.g., transfer count of -1)
     fn set_capability_i16(&mut self, cap: TW_UINT16, value: i16) {
+        let handle = self.handle.as_mut().expect("SourceOpened: no handle");
         let one_value = TW_ONEVALUE {
             ItemType: 3, // TWTY_INT16
             Item: value as u16 as TW_UINT32,
@@ -582,7 +643,7 @@ impl SourceOpened {
         };
 
         let result = unsafe {
-            self.handle.call(
+            handle.call(
                 &mut self.source_identity as *mut TW_IDENTITY,
                 DG_CONTROL,
                 DAT_CAPABILITY,
@@ -604,6 +665,7 @@ impl SourceOpened {
 
     /// Set a FIX32 capability value (e.g., resolution)
     fn set_capability_fix32(&mut self, cap: TW_UINT16, value: f32) {
+        let handle = self.handle.as_mut().expect("SourceOpened: no handle");
         let fix32 = TW_FIX32::from_f32(value);
         let item_value = unsafe {
             std::mem::transmute::<TW_FIX32, u32>(fix32)
@@ -621,7 +683,7 @@ impl SourceOpened {
         };
 
         let result = unsafe {
-            self.handle.call(
+            handle.call(
                 &mut self.source_identity as *mut TW_IDENTITY,
                 DG_CONTROL,
                 DAT_CAPABILITY,
@@ -645,6 +707,8 @@ impl SourceOpened {
     pub fn enable(mut self, show_ui: bool) -> TwainResult<SourceEnabled> {
         info!("Enabling data source (show_ui={})", show_ui);
 
+        let mut handle = self.handle.take().expect("SourceOpened: handle already consumed");
+
         let mut ui = TW_USERINTERFACE {
             ShowUI: if show_ui { 1 } else { 0 },
             ModalUI: if show_ui { 1 } else { 0 },
@@ -652,7 +716,7 @@ impl SourceOpened {
         };
 
         unsafe {
-            self.handle.call_checked(
+            handle.call_checked(
                 &mut self.source_identity as *mut TW_IDENTITY,
                 DG_CONTROL,
                 DAT_USERINTERFACE,
@@ -664,7 +728,7 @@ impl SourceOpened {
         info!("Data source enabled");
 
         Ok(SourceEnabled {
-            handle: self.handle,
+            handle: Some(handle),
             hwnd: self.hwnd,
             source_identity: self.source_identity,
         })
@@ -673,8 +737,9 @@ impl SourceOpened {
     /// Close the source without scanning (transition back to State 3)
     pub fn close(mut self) -> TwainResult<DsmOpened> {
         info!("Closing data source");
+        let mut handle = self.handle.take().expect("SourceOpened: handle already consumed");
         unsafe {
-            self.handle.call_checked(
+            handle.call_checked(
                 ptr::null_mut(),
                 DG_CONTROL,
                 DAT_IDENTITY,
@@ -683,7 +748,7 @@ impl SourceOpened {
             )?;
         }
         Ok(DsmOpened {
-            handle: self.handle,
+            handle: Some(handle),
             hwnd: self.hwnd,
         })
     }
@@ -694,39 +759,95 @@ impl SourceOpened {
 // ---------------------------------------------------------------------------
 
 pub struct SourceEnabled {
-    handle: DsmHandle,
+    handle: Option<DsmHandle>,
     hwnd: isize,
     source_identity: TW_IDENTITY,
+}
+
+impl Drop for SourceEnabled {
+    fn drop(&mut self) {
+        if let Some(mut handle) = self.handle.take() {
+            warn!("SourceEnabled dropped without clean close — disabling, closing source, closing DSM");
+            unsafe {
+                let mut ui = TW_USERINTERFACE {
+                    ShowUI: 0,
+                    ModalUI: 0,
+                    hParent: self.hwnd as TW_HANDLE,
+                };
+                let _ = handle.call_checked(
+                    &mut self.source_identity as *mut TW_IDENTITY,
+                    DG_CONTROL,
+                    DAT_USERINTERFACE,
+                    MSG_DISABLEDS,
+                    &mut ui as *mut TW_USERINTERFACE as TW_MEMREF,
+                );
+                let _ = handle.call_checked(
+                    ptr::null_mut(),
+                    DG_CONTROL,
+                    DAT_IDENTITY,
+                    MSG_CLOSEDS,
+                    &mut self.source_identity as *mut TW_IDENTITY as TW_MEMREF,
+                );
+                let _ = handle.call_checked(
+                    ptr::null_mut(),
+                    DG_CONTROL,
+                    DAT_PARENT,
+                    MSG_CLOSEDSM,
+                    self.hwnd as TW_MEMREF,
+                );
+            }
+        }
+    }
 }
 
 impl SourceEnabled {
     /// Process Windows messages and wait for TWAIN events.
     /// Returns `TransferReady` when the scanner signals MSG_XFERREADY,
     /// or transitions back on MSG_CLOSEDSREQ.
+    ///
+    /// Accepts an optional cancellation flag; when set, the method returns
+    /// `WaitResult::CloseRequested` after disabling the source.
     #[cfg(windows)]
-    pub fn wait_for_transfer(mut self) -> TwainResult<WaitResult> {
+    pub fn wait_for_transfer(
+        mut self,
+        cancel_flag: Option<&std::sync::atomic::AtomicBool>,
+    ) -> TwainResult<WaitResult> {
+        use std::sync::atomic::Ordering;
         use windows::Win32::UI::WindowsAndMessaging::{
-            GetMessageW, TranslateMessage, DispatchMessageW, MSG,
+            PeekMessageW, TranslateMessage, DispatchMessageW, MSG, PM_REMOVE,
         };
 
         info!("Waiting for scanner transfer ready signal");
 
         loop {
-            let mut win_msg = MSG::default();
-            let ret = unsafe { GetMessageW(&mut win_msg, None, 0, 0) };
+            // Check for cancellation
+            if let Some(flag) = cancel_flag {
+                if flag.load(Ordering::Acquire) {
+                    info!("Cancelled while waiting for transfer");
+                    return Ok(WaitResult::CloseRequested(self.disable()?));
+                }
+            }
 
-            if !ret.as_bool() {
-                return Err(TwainError::InvalidState);
+            let mut win_msg = MSG::default();
+            let has_msg = unsafe {
+                PeekMessageW(&mut win_msg, None, 0, 0, PM_REMOVE)
+            };
+
+            if !has_msg.as_bool() {
+                // No message available, sleep briefly to avoid busy-spinning
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
             }
 
             // Pass the message to TWAIN for processing
+            let handle = self.handle.as_mut().expect("SourceEnabled: no handle");
             let mut tw_event = TW_EVENT {
                 pEvent: &mut win_msg as *mut MSG as TW_MEMREF,
                 TWMessage: 0,
             };
 
             let rc = unsafe {
-                self.handle.call(
+                handle.call(
                     &mut self.source_identity as *mut TW_IDENTITY,
                     DG_CONTROL,
                     DAT_EVENT,
@@ -739,8 +860,9 @@ impl SourceEnabled {
                 match tw_event.TWMessage {
                     MSG_XFERREADY => {
                         info!("Scanner signals transfer ready");
+                        let handle = self.handle.take().expect("SourceEnabled: handle consumed");
                         return Ok(WaitResult::TransferReady(TransferReady {
-                            handle: self.handle,
+                            handle: Some(handle),
                             hwnd: self.hwnd,
                             source_identity: self.source_identity,
                         }));
@@ -768,13 +890,18 @@ impl SourceEnabled {
     }
 
     #[cfg(not(windows))]
-    pub fn wait_for_transfer(self) -> TwainResult<WaitResult> {
+    pub fn wait_for_transfer(
+        self,
+        _cancel_flag: Option<&std::sync::atomic::AtomicBool>,
+    ) -> TwainResult<WaitResult> {
         Err(TwainError::InvalidState)
     }
 
     /// Disable the source (transition back to State 4)
     pub fn disable(mut self) -> TwainResult<SourceOpened> {
         info!("Disabling data source");
+
+        let mut handle = self.handle.take().expect("SourceEnabled: handle already consumed");
 
         let mut ui = TW_USERINTERFACE {
             ShowUI: 0,
@@ -783,7 +910,7 @@ impl SourceEnabled {
         };
 
         unsafe {
-            self.handle.call_checked(
+            handle.call_checked(
                 &mut self.source_identity as *mut TW_IDENTITY,
                 DG_CONTROL,
                 DAT_USERINTERFACE,
@@ -793,7 +920,7 @@ impl SourceEnabled {
         }
 
         Ok(SourceOpened {
-            handle: self.handle,
+            handle: Some(handle),
             hwnd: self.hwnd,
             source_identity: self.source_identity,
         })
@@ -810,18 +937,67 @@ pub enum WaitResult {
 // ---------------------------------------------------------------------------
 
 pub struct TransferReady {
-    handle: DsmHandle,
+    handle: Option<DsmHandle>,
     hwnd: isize,
     source_identity: TW_IDENTITY,
+}
+
+impl Drop for TransferReady {
+    fn drop(&mut self) {
+        if let Some(mut handle) = self.handle.take() {
+            warn!("TransferReady dropped without clean close — resetting, disabling, closing source, closing DSM");
+            unsafe {
+                // Reset pending transfers
+                let mut pending = TW_PENDINGXFERS::default();
+                let _ = handle.call_checked(
+                    &mut self.source_identity as *mut TW_IDENTITY,
+                    DG_CONTROL,
+                    DAT_PENDINGXFERS,
+                    MSG_RESET,
+                    &mut pending as *mut TW_PENDINGXFERS as TW_MEMREF,
+                );
+                // Disable source
+                let mut ui = TW_USERINTERFACE {
+                    ShowUI: 0,
+                    ModalUI: 0,
+                    hParent: self.hwnd as TW_HANDLE,
+                };
+                let _ = handle.call_checked(
+                    &mut self.source_identity as *mut TW_IDENTITY,
+                    DG_CONTROL,
+                    DAT_USERINTERFACE,
+                    MSG_DISABLEDS,
+                    &mut ui as *mut TW_USERINTERFACE as TW_MEMREF,
+                );
+                // Close source
+                let _ = handle.call_checked(
+                    ptr::null_mut(),
+                    DG_CONTROL,
+                    DAT_IDENTITY,
+                    MSG_CLOSEDS,
+                    &mut self.source_identity as *mut TW_IDENTITY as TW_MEMREF,
+                );
+                // Close DSM
+                let _ = handle.call_checked(
+                    ptr::null_mut(),
+                    DG_CONTROL,
+                    DAT_PARENT,
+                    MSG_CLOSEDSM,
+                    self.hwnd as TW_MEMREF,
+                );
+            }
+        }
+    }
 }
 
 impl TransferReady {
     /// Get image information for the current page
     pub fn get_image_info(&mut self) -> TwainResult<TW_IMAGEINFO> {
+        let handle = self.handle.as_mut().expect("TransferReady: no handle");
         let mut info = TW_IMAGEINFO::default();
 
         unsafe {
-            self.handle.call_checked(
+            handle.call_checked(
                 &mut self.source_identity as *mut TW_IDENTITY,
                 DG_IMAGE,
                 DAT_IMAGEINFO,
@@ -849,14 +1025,17 @@ impl TransferReady {
 
         // Get memory transfer setup
         let mut setup = TW_SETUPMEMXFER::default();
-        unsafe {
-            self.handle.call_checked(
-                &mut self.source_identity as *mut TW_IDENTITY,
-                DG_CONTROL,
-                DAT_SETUPMEMXFER,
-                MSG_GET,
-                &mut setup as *mut TW_SETUPMEMXFER as TW_MEMREF,
-            )?;
+        {
+            let handle = self.handle.as_mut().expect("TransferReady: no handle");
+            unsafe {
+                handle.call_checked(
+                    &mut self.source_identity as *mut TW_IDENTITY,
+                    DG_CONTROL,
+                    DAT_SETUPMEMXFER,
+                    MSG_GET,
+                    &mut setup as *mut TW_SETUPMEMXFER as TW_MEMREF,
+                )?;
+            }
         }
 
         let buf_size = setup.Preferred as usize;
@@ -868,6 +1047,7 @@ impl TransferReady {
         let mut image_data = Vec::new();
 
         loop {
+            let handle = self.handle.as_mut().expect("TransferReady: no handle");
             let mut mem_xfer = TW_IMAGEMEMXFER {
                 Memory: TW_MEMORY {
                     Flags: TWMF_APPOWNS | TWMF_POINTER,
@@ -878,7 +1058,7 @@ impl TransferReady {
             };
 
             let rc = unsafe {
-                self.handle.call(
+                handle.call(
                     &mut self.source_identity as *mut TW_IDENTITY,
                     DG_IMAGE,
                     DAT_IMAGEMEMXFER,
@@ -902,14 +1082,17 @@ impl TransferReady {
 
         // End the transfer
         let mut pending = TW_PENDINGXFERS::default();
-        unsafe {
-            self.handle.call_checked(
-                &mut self.source_identity as *mut TW_IDENTITY,
-                DG_CONTROL,
-                DAT_PENDINGXFERS,
-                MSG_ENDXFER,
-                &mut pending as *mut TW_PENDINGXFERS as TW_MEMREF,
-            )?;
+        {
+            let handle = self.handle.as_mut().expect("TransferReady: no handle");
+            unsafe {
+                handle.call_checked(
+                    &mut self.source_identity as *mut TW_IDENTITY,
+                    DG_CONTROL,
+                    DAT_PENDINGXFERS,
+                    MSG_ENDXFER,
+                    &mut pending as *mut TW_PENDINGXFERS as TW_MEMREF,
+                )?;
+            }
         }
 
         let page = ScannedPage {
@@ -922,12 +1105,14 @@ impl TransferReady {
             data: image_data,
         };
 
+        let handle = self.handle.take().expect("TransferReady: handle already consumed");
+
         if pending.Count == 0 {
             info!("All transfers complete");
             Ok(TransferResult::Done {
                 page,
                 source: SourceOpened {
-                    handle: self.handle,
+                    handle: Some(handle),
                     hwnd: self.hwnd,
                     source_identity: self.source_identity,
                 },
@@ -937,7 +1122,7 @@ impl TransferReady {
             Ok(TransferResult::MorePages {
                 page,
                 next: TransferReady {
-                    handle: self.handle,
+                    handle: Some(handle),
                     hwnd: self.hwnd,
                     source_identity: self.source_identity,
                 },
@@ -949,9 +1134,10 @@ impl TransferReady {
     pub fn cancel(mut self) -> TwainResult<SourceOpened> {
         info!("Cancelling transfer");
 
+        let mut handle = self.handle.take().expect("TransferReady: handle already consumed");
         let mut pending = TW_PENDINGXFERS::default();
         unsafe {
-            self.handle.call_checked(
+            handle.call_checked(
                 &mut self.source_identity as *mut TW_IDENTITY,
                 DG_CONTROL,
                 DAT_PENDINGXFERS,
@@ -961,7 +1147,7 @@ impl TransferReady {
         }
 
         Ok(SourceOpened {
-            handle: self.handle,
+            handle: Some(handle),
             hwnd: self.hwnd,
             source_identity: self.source_identity,
         })

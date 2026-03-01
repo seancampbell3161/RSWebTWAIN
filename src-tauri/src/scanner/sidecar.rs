@@ -16,6 +16,7 @@ use super::{ScanError, ScannerInfo, ScannerSource};
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
+#[allow(dead_code)] // Variants defined for future sidecar scanning support
 enum SidecarCommand {
     ListScanners,
     Scan {
@@ -32,6 +33,7 @@ enum SidecarCommand {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(dead_code)] // Variants/fields defined for future sidecar scanning support
 enum SidecarResponse {
     ScannerList {
         scanners: Vec<SidecarScannerEntry>,

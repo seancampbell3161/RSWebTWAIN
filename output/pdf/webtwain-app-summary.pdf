@@ -1,0 +1,61 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+6 0 obj
+<< /Length 2725 >>
+stream
+q 1 1 1 rg 0 0 612 792 re f Q
+0 0 0 rg
+BT /F2 20 Tf 1 0 0 1 54 750 Tm (WebTWAIN App Summary) Tj ET
+BT /F2 13 Tf 1 0 0 1 54 724 Tm (What it is) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 708 Tm (A headless Tauri system-tray scan agent that exposes TWAIN scanner control over localhost WebSocket.) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 693 Tm (It bridges browser clients to native scanner operations and can return per-page images or a generated PDF.) Tj ET
+BT /F2 13 Tf 1 0 0 1 54 671 Tm (Who it is for) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 655 Tm (Primary persona: developers/integrators building browser-based document capture flows for TWAIN scanners,) Tj ET
+BT /F1 11 Tf 1 0 0 1 54 640 Tm (including environments that still depend on legacy 32-bit TWAIN drivers.) Tj ET
+BT /F2 13 Tf 1 0 0 1 54 618 Tm (What it does) Tj ET
+BT /F1 11 Tf 1 0 0 1 62 602 Tm (- Runs as a background tray app with menu actions \(status/about/quit\) and autostart plugin wiring.) Tj ET
+BT /F1 11 Tf 1 0 0 1 62 587 Tm (- Hosts a WebSocket server on 127.0.0.1:47115 and accepts JSON request/response messages.) Tj ET
+BT /F1 11 Tf 1 0 0 1 62 572 Tm (- Supports ping, list_scanners, start_scan, and cancel_scan message types \(cancel currently not implemented\).) Tj ET
+BT /F1 11 Tf 1 0 0 1 62 557 Tm (- Discovers scanners through native 64-bit TWAIN and tracks scanner metadata \(id/name/manufacturer\).) Tj ET
+BT /F1 11 Tf 1 0 0 1 62 542 Tm (- Streams scan progress and page previews to clients, with output options: PNG, JPEG, or PDF.) Tj ET
+BT /F1 11 Tf 1 0 0 1 62 527 Tm (- Generates multi-page PDFs from scanned images and returns base64 PDF payload in scan_complete.) Tj ET
+BT /F1 11 Tf 1 0 0 1 62 512 Tm (- Includes a 32-bit sidecar binary/protocol for legacy TWAIN compatibility; full sidecar scanning is TODO.) Tj ET
+BT /F2 13 Tf 1 0 0 1 54 490 Tm (How it works \(repo-based architecture\)) Tj ET
+BT /F1 11 Tf 1 0 0 1 62 474 Tm (Browser client -> WebSocket server \(src-tauri/src/ws_server.rs\) -> command handler \(src-tauri/src/lib.rs\)) Tj ET
+BT /F1 11 Tf 1 0 0 1 62 459 Tm (-> ScanOrchestrator \(src-tauri/src/scanner/mod.rs\) -> native TWAIN module or sidecar manager) Tj ET
+BT /F1 11 Tf 1 0 0 1 62 444 Tm (-> page/image conversion + optional PDF generator \(src-tauri/src/pdf.rs\) -> WebSocket responses/events.) Tj ET
+BT /F2 13 Tf 1 0 0 1 54 422 Tm (How to run \(minimal\)) Tj ET
+BT /F1 11 Tf 1 0 0 1 62 406 Tm (1. Prerequisites for Tauri + TWAIN runtime \(exact versions/OS matrix: Not found in repo\).) Tj ET
+BT /F1 11 Tf 1 0 0 1 62 391 Tm (2. From repo root, start the agent: cargo run -p scan-agent) Tj ET
+BT /F1 11 Tf 1 0 0 1 62 376 Tm (3. Connect your client to ws://127.0.0.1:47115 and send protocol messages defined in src-tauri/src/protocol.rs.) Tj ET
+endstream
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000257 00000 n 
+0000000327 00000 n 
+0000000402 00000 n 
+trailer
+<< /Size 7 /Root 1 0 R >>
+startxref
+3178
+%%EOF

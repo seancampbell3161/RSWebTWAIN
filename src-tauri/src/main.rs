@@ -12,6 +12,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use scan_agent_lib::ws_server::{self, WsServerConfig};
+use tauri::Manager;
 use tauri::tray::TrayIconBuilder;
 use tracing::{error, info};
 
@@ -34,6 +35,25 @@ fn main() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            // --- Auth Token ---
+            let auth_token = if cfg!(debug_assertions) {
+                None
+            } else {
+                let token = uuid::Uuid::new_v4().to_string();
+                let data_dir = app.path().app_data_dir()?;
+                std::fs::create_dir_all(&data_dir)?;
+                let token_path = data_dir.join("ws-token");
+                std::fs::write(&token_path, &token)?;
+                info!("Auth token written to {}", token_path.display());
+                Some(token)
+            };
+
+            let token_cleanup_path = if !cfg!(debug_assertions) {
+                app.path().app_data_dir().ok().map(|d| d.join("ws-token"))
+            } else {
+                None
+            };
+
             // --- System Tray ---
             let quit = tauri::menu::MenuItem::with_id(app, "quit", "Quit Scan Agent", true, None::<&str>)?;
             let status = tauri::menu::MenuItem::with_id(app, "status", "Status: Ready", false, None::<&str>)?;
@@ -65,6 +85,9 @@ fn main() {
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "quit" => {
                         info!("Quit requested via tray menu");
+                        if let Some(ref path) = token_cleanup_path {
+                            let _ = std::fs::remove_file(path);
+                        }
                         app.exit(0);
                     }
                     "autostart" => {
@@ -101,6 +124,7 @@ fn main() {
                 let config = WsServerConfig {
                     port: ws_server::DEFAULT_WS_PORT,
                     allowed_origins: Vec::new(), // Allow all in dev; configure for production
+                    auth_token,
                 };
 
                 match ws_server::start_server(config).await {

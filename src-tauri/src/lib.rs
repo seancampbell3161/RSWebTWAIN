@@ -11,14 +11,31 @@ pub mod protocol;
 pub mod scanner;
 pub mod ws_server;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
-use protocol::{AgentMessage, ClientMessage, ErrorCode};
+use protocol::{AgentMessage, ClientMessage, ErrorCode, ScanStatus};
 use scanner::ScanOrchestrator;
 use ws_server::ResponseSender;
+
+/// Tracks state of the currently active scan (if any).
+struct ActiveScan {
+    scan_id: String,
+    cancel_flag: Arc<AtomicBool>,
+}
+
+/// Shared state for the command handler — concurrency guard + orchestrator.
+struct ScanState {
+    /// Whether a scan is currently in progress (fast atomic check).
+    scanning: AtomicBool,
+    /// Details of the active scan (for cancellation targeting).
+    active_scan: Mutex<Option<ActiveScan>>,
+    /// The scanner orchestrator (locked briefly for discovery/resolution, not during scans).
+    orchestrator: Mutex<ScanOrchestrator>,
+}
 
 /// Process incoming WebSocket commands and dispatch to the scanner orchestrator.
 ///
@@ -28,16 +45,20 @@ pub async fn command_handler(
     mut command_rx: ws_server::CommandReceiver,
     event_tx: ws_server::EventSender,
 ) {
-    let orchestrator = Arc::new(Mutex::new(ScanOrchestrator::new()));
+    let state = Arc::new(ScanState {
+        scanning: AtomicBool::new(false),
+        active_scan: Mutex::new(None),
+        orchestrator: Mutex::new(ScanOrchestrator::new()),
+    });
 
     info!("Command handler started");
 
     while let Some((message, response_tx)) = command_rx.recv().await {
-        let orchestrator = orchestrator.clone();
+        let state = state.clone();
         let event_tx = event_tx.clone();
 
         tokio::spawn(async move {
-            handle_command(message, response_tx, orchestrator, event_tx).await;
+            handle_command(message, response_tx, state, event_tx).await;
         });
     }
 
@@ -47,7 +68,7 @@ pub async fn command_handler(
 async fn handle_command(
     message: ClientMessage,
     response_tx: ResponseSender,
-    orchestrator: Arc<Mutex<ScanOrchestrator>>,
+    state: Arc<ScanState>,
     _event_tx: ws_server::EventSender,
 ) {
     match message {
@@ -56,7 +77,7 @@ async fn handle_command(
         }
 
         ClientMessage::ListScanners { id } => {
-            let mut orch = orchestrator.lock().await;
+            let mut orch = state.orchestrator.lock().await;
             match orch.discover_scanners() {
                 Ok(scanners) => {
                     let entries = scanners
@@ -85,17 +106,54 @@ async fn handle_command(
         }
 
         ClientMessage::StartScan { id, options } => {
-            let scan_id = uuid::Uuid::new_v4().to_string();
-            let orch = orchestrator.lock().await;
-
-            // Clone what we need before dropping the lock
-            let req_id = id.clone();
-            let s_id = scan_id.clone();
-
-            match orch
-                .execute_scan(req_id, s_id, &options, response_tx.clone())
-                .await
+            // Fast-reject if a scan is already in progress
+            if state
+                .scanning
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
             {
+                let _ = response_tx.send(AgentMessage::Error {
+                    id,
+                    code: ErrorCode::ScannerBusy,
+                    message: "A scan is already in progress".to_string(),
+                });
+                return;
+            }
+
+            let scan_id = uuid::Uuid::new_v4().to_string();
+            let cancel_flag = Arc::new(AtomicBool::new(false));
+
+            // Register the active scan
+            {
+                let mut active = state.active_scan.lock().await;
+                *active = Some(ActiveScan {
+                    scan_id: scan_id.clone(),
+                    cancel_flag: cancel_flag.clone(),
+                });
+            }
+
+            // Resolve which scanner to use (brief lock, then release)
+            let scanner_info = {
+                let orch = state.orchestrator.lock().await;
+                orch.resolve_scanner(&options)
+            };
+
+            let result = match scanner_info {
+                Ok(info) => {
+                    scanner::execute_native_scan(
+                        id.clone(),
+                        scan_id.clone(),
+                        &info.name,
+                        &options,
+                        response_tx.clone(),
+                        cancel_flag,
+                    )
+                    .await
+                }
+                Err(e) => Err(e),
+            };
+
+            match result {
                 Ok(()) => {
                     info!("Scan {} completed successfully", scan_id);
                 }
@@ -108,16 +166,37 @@ async fn handle_command(
                     });
                 }
             }
+
+            // Always clear scanning state
+            {
+                let mut active = state.active_scan.lock().await;
+                *active = None;
+            }
+            state.scanning.store(false, Ordering::Release);
         }
 
         ClientMessage::CancelScan { id, scan_id } => {
-            // TODO: Implement cancellation via a shared cancellation token
-            warn!("Cancel scan requested for {} (not yet implemented)", scan_id);
-            let _ = response_tx.send(AgentMessage::Error {
-                id,
-                code: ErrorCode::InternalError,
-                message: "Scan cancellation not yet implemented".to_string(),
-            });
+            let active = state.active_scan.lock().await;
+            match &*active {
+                Some(active_scan) if active_scan.scan_id == scan_id => {
+                    info!("Cancelling scan {}", scan_id);
+                    active_scan.cancel_flag.store(true, Ordering::Release);
+                    let _ = response_tx.send(AgentMessage::ScanProgress {
+                        id,
+                        scan_id,
+                        page: 0,
+                        status: ScanStatus::Complete,
+                    });
+                }
+                _ => {
+                    warn!("Cancel requested for unknown scan: {}", scan_id);
+                    let _ = response_tx.send(AgentMessage::Error {
+                        id,
+                        code: ErrorCode::InvalidRequest,
+                        message: format!("No active scan with id: {}", scan_id),
+                    });
+                }
+            }
         }
     }
 }

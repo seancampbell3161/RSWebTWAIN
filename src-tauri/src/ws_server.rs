@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
@@ -25,6 +25,9 @@ pub struct WsServerConfig {
     /// Allowed origins for CORS-like validation (e.g., "https://your-app.example.com")
     /// If empty, all origins are allowed (development mode).
     pub allowed_origins: Vec<String>,
+    /// Auth token for WebSocket connections. If `Some`, clients must include `?token=<value>`
+    /// in the connection URL. If `None`, no authentication is required (development mode).
+    pub auth_token: Option<String>,
 }
 
 impl Default for WsServerConfig {
@@ -32,6 +35,7 @@ impl Default for WsServerConfig {
         Self {
             port: DEFAULT_WS_PORT,
             allowed_origins: Vec::new(),
+            auth_token: None,
         }
     }
 }
@@ -116,7 +120,7 @@ async fn handle_connection(
     // Accept WebSocket upgrade with origin validation
     let config_clone = config.clone();
     let ws_stream = tokio_tungstenite::accept_hdr_async(stream, move |req: &Request, resp: Response| {
-        validate_origin(req, &config_clone.allowed_origins, resp)
+        validate_handshake(req, &config_clone, resp)
     })
     .await;
 
@@ -130,7 +134,7 @@ async fn handle_connection(
 
     info!("WebSocket connection established: {}", peer_addr);
 
-    let (mut ws_tx, mut ws_rx) = ws_stream.split();
+    let (ws_tx, mut ws_rx) = ws_stream.split();
     let (response_tx, mut response_rx): (ResponseSender, ResponseReceiver) =
         mpsc::unbounded_channel();
 
@@ -139,14 +143,29 @@ async fn handle_connection(
     let ws_tx_events = ws_tx.clone();
     let ws_tx_responses = ws_tx.clone();
 
+    // Watch channel to signal per-connection tasks to shut down cooperatively
+    let (close_tx, _) = watch::channel(false);
+    let mut close_rx_resp = close_tx.subscribe();
+    let mut close_rx_evt = close_tx.subscribe();
+
     // Forward direct responses to this client
     let response_task = tokio::spawn(async move {
-        while let Some(msg) = response_rx.recv().await {
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let mut tx = ws_tx_responses.lock().await;
-                if tx.send(Message::Text(json.into())).await.is_err() {
-                    break;
+        loop {
+            tokio::select! {
+                msg = response_rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            if let Ok(json) = serde_json::to_string(&msg) {
+                                let mut tx = ws_tx_responses.lock().await;
+                                if tx.send(Message::Text(json.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        None => break,
+                    }
                 }
+                _ = close_rx_resp.changed() => break,
             }
         }
     });
@@ -154,19 +173,24 @@ async fn handle_connection(
     // Forward broadcast events to this client
     let event_task = tokio::spawn(async move {
         loop {
-            match event_rx.recv().await {
-                Ok(msg) => {
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let mut tx = ws_tx_events.lock().await;
-                        if tx.send(Message::Text(json.into())).await.is_err() {
-                            break;
+            tokio::select! {
+                result = event_rx.recv() => {
+                    match result {
+                        Ok(msg) => {
+                            if let Ok(json) = serde_json::to_string(&msg) {
+                                let mut tx = ws_tx_events.lock().await;
+                                if tx.send(Message::Text(json.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("Client {} lagged {} events", peer_addr, n);
                         }
                     }
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!("Client {} lagged {} events", peer_addr, n);
-                }
+                _ = close_rx_evt.changed() => break,
             }
         }
     });
@@ -213,40 +237,74 @@ async fn handle_connection(
         }
     }
 
-    response_task.abort();
-    event_task.abort();
+    // Signal per-connection tasks to shut down cooperatively
+    let _ = close_tx.send(true);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let _ = response_task.await;
+        let _ = event_task.await;
+    })
+    .await;
+
     info!("Connection handler ended for {}", peer_addr);
 }
 
-/// Validate the Origin header against allowed origins
-fn validate_origin(
+/// Validate the WebSocket handshake: origin + auth token.
+fn validate_handshake(
     req: &Request,
-    allowed_origins: &[String],
+    config: &WsServerConfig,
     resp: Response,
 ) -> Result<Response, tokio_tungstenite::tungstenite::http::Response<Option<String>>> {
-    // In development mode (no allowed origins configured), accept all
-    if allowed_origins.is_empty() {
-        return Ok(resp);
-    }
+    // --- Origin validation ---
+    if !config.allowed_origins.is_empty() {
+        let origin = req
+            .headers()
+            .get("Origin")
+            .and_then(|v| v.to_str().ok());
 
-    let origin = req
-        .headers()
-        .get("Origin")
-        .and_then(|v| v.to_str().ok());
-
-    match origin {
-        Some(origin) if allowed_origins.iter().any(|ao| ao == origin) => Ok(resp),
-        Some(origin) => {
-            warn!("Rejected connection from unauthorized origin: {}", origin);
-            let reject = tokio_tungstenite::tungstenite::http::Response::builder()
-                .status(403)
-                .body(Some("Forbidden: Origin not allowed".to_string()))
-                .unwrap();
-            Err(reject)
-        }
-        None => {
-            // No origin header — could be a non-browser client, allow it
-            Ok(resp)
+        match origin {
+            Some(origin) if config.allowed_origins.iter().any(|ao| ao == origin) => {}
+            Some(origin) => {
+                warn!("Rejected connection from unauthorized origin: {}", origin);
+                let reject = tokio_tungstenite::tungstenite::http::Response::builder()
+                    .status(403)
+                    .body(Some("Forbidden: Origin not allowed".to_string()))
+                    .unwrap();
+                return Err(reject);
+            }
+            None => {
+                // No origin header — could be a non-browser client, allow it
+            }
         }
     }
+
+    // --- Auth token validation ---
+    if let Some(expected) = &config.auth_token {
+        let provided = req.uri().query().and_then(parse_token_from_query);
+
+        match provided {
+            Some(token) if token == expected => {}
+            _ => {
+                warn!("Rejected connection: invalid or missing auth token");
+                let reject = tokio_tungstenite::tungstenite::http::Response::builder()
+                    .status(401)
+                    .body(Some("Unauthorized: Invalid or missing token".to_string()))
+                    .unwrap();
+                return Err(reject);
+            }
+        }
+    }
+
+    Ok(resp)
+}
+
+/// Extract `token` value from a URI query string (e.g., "token=abc&foo=bar" -> "abc").
+fn parse_token_from_query(query: &str) -> Option<&str> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        if key == "token" {
+            Some(value)
+        } else {
+            None
+        }
+    })
 }

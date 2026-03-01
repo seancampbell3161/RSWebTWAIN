@@ -4,7 +4,6 @@
 //! verifying the full message round-trip without needing scanner hardware.
 
 use futures_util::{SinkExt, StreamExt};
-use scan_agent_lib::protocol::AgentMessage;
 use scan_agent_lib::ws_server::{self, WsServerConfig};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -20,6 +19,7 @@ async fn ping_pong() {
     let config = WsServerConfig {
         port,
         allowed_origins: Vec::new(),
+        auth_token: None,
     };
 
     let handle = ws_server::start_server(config).await.unwrap();
@@ -58,6 +58,7 @@ async fn list_scanners_returns_valid_response() {
     let config = WsServerConfig {
         port,
         allowed_origins: Vec::new(),
+        auth_token: None,
     };
 
     let handle = ws_server::start_server(config).await.unwrap();
@@ -101,6 +102,7 @@ async fn invalid_json_returns_error() {
     let config = WsServerConfig {
         port,
         allowed_origins: Vec::new(),
+        auth_token: None,
     };
 
     let handle = ws_server::start_server(config).await.unwrap();
@@ -134,6 +136,7 @@ async fn multiple_clients_can_connect() {
     let config = WsServerConfig {
         port,
         allowed_origins: Vec::new(),
+        auth_token: None,
     };
 
     let handle = ws_server::start_server(config).await.unwrap();
