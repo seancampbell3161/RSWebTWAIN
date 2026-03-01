@@ -11,10 +11,15 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use scan_agent_lib::ws_server::{self, WsServerConfig, DEFAULT_WS_PORT};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use scan_agent_lib::protocol::AgentMessage;
+use scan_agent_lib::ws_server::{self, EventSender, WsServerConfig, DEFAULT_WS_PORT};
 use tauri::Manager;
 use tauri::tray::TrayIconBuilder;
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_dialog::DialogExt;
 use tracing::{error, info, warn};
 
 fn main() {
@@ -34,6 +39,7 @@ fn main() {
             None,
         ))
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             // --- Auth Token ---
@@ -118,14 +124,28 @@ fn main() {
                         }
                     }
                     "about" => {
-                        info!("About requested");
-                        // Could show a small dialog, but we're headless
+                        let version = app.package_info().version.to_string();
+                        app.dialog()
+                            .message(format!(
+                                "Scan Agent v{}\n\n\
+                                 A background scanning service that bridges\n\
+                                 your web application to local TWAIN scanners.\n\n\
+                                 WebSocket: ws://127.0.0.1:{}\n\
+                                 Protocol: scan-agent://",
+                                version, DEFAULT_WS_PORT
+                            ))
+                            .title("About Scan Agent")
+                            .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+                            .blocking_show();
                     }
                     _ => {}
                 })
                 .build(app)?;
 
             // --- Deep Links ---
+            // Shared sender filled once the WS server starts; deep link handler reads it.
+            let deep_link_tx: Arc<Mutex<Option<EventSender>>> = Arc::new(Mutex::new(None));
+
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -133,11 +153,43 @@ fn main() {
                     error!("Failed to register deep link: {}", e);
                 }
 
-                app.deep_link().on_open_url(|event| {
-                    info!("Deep link received: {:?}", event.urls());
-                    // Deep link URLs can carry scan parameters:
-                    // scan-agent://scan?scanner=default&format=pdf
-                    // For now, we just log — the WS server handles actual commands
+                let dl_tx = deep_link_tx.clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        info!("Deep link received: {}", url);
+
+                        // Parse the URL: scan-agent://action?key=value&...
+                        let action = if url.host_str().is_some() {
+                            url.host_str().map(|s| s.to_string())
+                        } else {
+                            // Some URL parsers put the path as the action
+                            let path = url.path().trim_start_matches('/');
+                            if path.is_empty() { None } else { Some(path.to_string()) }
+                        };
+
+                        let params: HashMap<String, String> = url
+                            .query_pairs()
+                            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                            .collect();
+
+                        let msg = AgentMessage::DeepLink {
+                            url: url.to_string(),
+                            action,
+                            params,
+                        };
+
+                        // Broadcast to all connected WS clients (if server is up)
+                        if let Ok(guard) = dl_tx.lock() {
+                            if let Some(ref tx) = *guard {
+                                match tx.send(msg) {
+                                    Ok(n) => info!("Deep link broadcast to {} client(s)", n),
+                                    Err(_) => info!("Deep link received but no clients connected"),
+                                }
+                            } else {
+                                warn!("Deep link received before WS server started");
+                            }
+                        }
+                    }
                 });
             }
 
@@ -207,6 +259,11 @@ fn main() {
                 match ws_server::start_server(config).await {
                     Ok(handle) => {
                         info!("WebSocket server started on port {}", port);
+
+                        // Share the event sender with the deep link handler
+                        if let Ok(mut guard) = deep_link_tx.lock() {
+                            *guard = Some(handle.event_tx.clone());
+                        }
 
                         // Start the command handler
                         scan_agent_lib::command_handler(handle.command_rx, handle.event_tx, sidecar_path).await;

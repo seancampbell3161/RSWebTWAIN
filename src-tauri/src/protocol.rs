@@ -107,6 +107,14 @@ pub enum AgentMessage {
         id: String,
     },
     ServerShutdown,
+    DeepLink {
+        url: String,
+        /// The host/action portion of the deep link (e.g., "scan" from scan-agent://scan?...)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
+        /// Query parameters parsed from the deep link URL
+        params: std::collections::HashMap<String, String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
