@@ -26,7 +26,7 @@ async fn ping_pong() {
 
     // Spawn the command handler in the background
     let event_tx = handle.event_tx.clone();
-    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx));
+    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
 
     // Connect a WebSocket client
     let url = format!("ws://127.0.0.1:{}", port);
@@ -63,7 +63,7 @@ async fn list_scanners_returns_valid_response() {
 
     let handle = ws_server::start_server(config).await.unwrap();
     let event_tx = handle.event_tx.clone();
-    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx));
+    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
 
     let url = format!("ws://127.0.0.1:{}", port);
     let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
@@ -107,7 +107,7 @@ async fn invalid_json_returns_error() {
 
     let handle = ws_server::start_server(config).await.unwrap();
     let event_tx = handle.event_tx.clone();
-    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx));
+    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
 
     let url = format!("ws://127.0.0.1:{}", port);
     let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
@@ -141,7 +141,7 @@ async fn multiple_clients_can_connect() {
 
     let handle = ws_server::start_server(config).await.unwrap();
     let event_tx = handle.event_tx.clone();
-    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx));
+    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
 
     let url = format!("ws://127.0.0.1:{}", port);
 

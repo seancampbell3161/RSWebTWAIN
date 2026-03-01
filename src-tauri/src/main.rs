@@ -118,6 +118,19 @@ fn main() {
                 });
             }
 
+            // --- Sidecar Path ---
+            let sidecar_path = std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|p| p.join("twain-scanner-32bit.exe")))
+                .filter(|p| p.exists())
+                .map(|p| p.to_string_lossy().into_owned());
+
+            if let Some(ref path) = sidecar_path {
+                info!("32-bit sidecar found: {}", path);
+            } else {
+                info!("32-bit sidecar not found (32-bit-only scanners will be unavailable)");
+            }
+
             // --- WebSocket Server ---
             let port: u16 = match std::env::var("SCAN_AGENT_PORT") {
                 Ok(val) => match val.parse() {
@@ -146,7 +159,7 @@ fn main() {
                         info!("WebSocket server started on port {}", port);
 
                         // Start the command handler
-                        scan_agent_lib::command_handler(handle.command_rx, handle.event_tx).await;
+                        scan_agent_lib::command_handler(handle.command_rx, handle.event_tx, sidecar_path).await;
                     }
                     Err(e) => {
                         error!("Failed to start WebSocket server: {}", e);

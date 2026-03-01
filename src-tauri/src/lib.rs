@@ -35,6 +35,8 @@ struct ScanState {
     active_scan: Mutex<Option<ActiveScan>>,
     /// The scanner orchestrator (locked briefly for discovery/resolution, not during scans).
     orchestrator: Mutex<ScanOrchestrator>,
+    /// Path to the 32-bit sidecar executable (None if unavailable).
+    sidecar_path: Option<String>,
 }
 
 /// Process incoming WebSocket commands and dispatch to the scanner orchestrator.
@@ -44,11 +46,13 @@ struct ScanState {
 pub async fn command_handler(
     mut command_rx: ws_server::CommandReceiver,
     event_tx: ws_server::EventSender,
+    sidecar_path: Option<String>,
 ) {
     let state = Arc::new(ScanState {
         scanning: AtomicBool::new(false),
         active_scan: Mutex::new(None),
-        orchestrator: Mutex::new(ScanOrchestrator::new()),
+        orchestrator: Mutex::new(ScanOrchestrator::new(sidecar_path.clone())),
+        sidecar_path,
     });
 
     info!("Command handler started");
@@ -165,17 +169,37 @@ async fn handle_command(
             };
 
             let result = match scanner_info {
-                Ok(info) => {
-                    scanner::execute_native_scan(
-                        id.clone(),
-                        scan_id.clone(),
-                        &info.name,
-                        &options,
-                        response_tx.clone(),
-                        cancel_flag,
-                    )
-                    .await
-                }
+                Ok(info) => match info.source {
+                    scanner::ScannerSource::Sidecar => {
+                        if let Some(ref path) = state.sidecar_path {
+                            scanner::execute_sidecar_scan(
+                                id.clone(),
+                                scan_id.clone(),
+                                &info.name,
+                                &options,
+                                path,
+                                response_tx.clone(),
+                                cancel_flag,
+                            )
+                            .await
+                        } else {
+                            Err(scanner::ScanError::Sidecar(
+                                "Sidecar not available".to_string(),
+                            ))
+                        }
+                    }
+                    scanner::ScannerSource::Native => {
+                        scanner::execute_native_scan(
+                            id.clone(),
+                            scan_id.clone(),
+                            &info.name,
+                            &options,
+                            response_tx.clone(),
+                            cancel_flag,
+                        )
+                        .await
+                    }
+                },
                 Err(e) => Err(e),
             };
 

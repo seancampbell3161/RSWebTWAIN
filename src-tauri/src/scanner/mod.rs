@@ -143,14 +143,17 @@ pub struct ScanOrchestrator {
     native_available: bool,
     /// Whether the sidecar is available
     sidecar_available: bool,
+    /// Path to the 32-bit sidecar executable (None if unavailable)
+    sidecar_path: Option<String>,
 }
 
 impl ScanOrchestrator {
-    pub fn new() -> Self {
+    pub fn new(sidecar_path: Option<String>) -> Self {
         Self {
             scanners: Vec::new(),
             native_available: false,
             sidecar_available: false,
+            sidecar_path,
         }
     }
 
@@ -236,9 +239,20 @@ impl ScanOrchestrator {
     }
 
     fn discover_sidecar_scanners(&self) -> Result<Vec<ScannerInfo>, ScanError> {
-        // TODO: Spawn sidecar process, send list_scanners command via stdio
-        // For now, return empty — sidecar implementation follows
-        Ok(Vec::new())
+        let sidecar_path = match &self.sidecar_path {
+            Some(p) => p.clone(),
+            None => return Ok(Vec::new()), // No sidecar available
+        };
+
+        let mut manager = sidecar::SidecarManager::new(sidecar_path);
+        let scanners = manager.list_scanners()?;
+        manager.shutdown();
+        Ok(scanners)
+    }
+
+    /// Get the sidecar path (for passing to execute_sidecar_scan)
+    pub fn sidecar_path(&self) -> Option<&str> {
+        self.sidecar_path.as_deref()
     }
 }
 
@@ -468,4 +482,245 @@ pub async fn execute_native_scan(
     });
 
     Ok(())
+}
+
+/// Execute a scan via the 32-bit sidecar and stream results back via the provided sender.
+///
+/// Mirrors the structure of `execute_native_scan`: blocking I/O runs in `spawn_blocking`,
+/// page data flows through an mpsc channel, and the async side converts + sends over WebSocket.
+pub async fn execute_sidecar_scan(
+    request_id: String,
+    scan_id: String,
+    scanner_name: &str,
+    options: &ScanRequestOptions,
+    sidecar_path: &str,
+    response_tx: mpsc::UnboundedSender<AgentMessage>,
+    cancel_flag: Arc<AtomicBool>,
+) -> Result<(), ScanError> {
+    let scanner_name = scanner_name.to_string();
+    let sidecar_path = sidecar_path.to_string();
+    let color_mode_str = match options.color_mode {
+        twain::ColorMode::Color => "color",
+        twain::ColorMode::Grayscale => "grayscale",
+        twain::ColorMode::BlackWhite => "bw",
+    }
+    .to_string();
+    let resolution = options.resolution;
+    let duplex = options.duplex;
+    let use_adf = options.use_adf;
+    let show_ui = options.show_scanner_ui;
+    let format = options.format;
+    let cancel_for_blocking = cancel_flag.clone();
+
+    let (page_tx, mut page_rx) = mpsc::channel::<PageData>(4);
+
+    // Run sidecar I/O in a blocking task (SidecarManager uses blocking I/O)
+    let sidecar_task = tokio::task::spawn_blocking(move || -> Result<(), ScanError> {
+        let mut manager = sidecar::SidecarManager::new(sidecar_path);
+        manager.ensure_running()?;
+        manager.start_scan(
+            &scanner_name,
+            resolution,
+            &color_mode_str,
+            duplex,
+            use_adf,
+            show_ui,
+        )?;
+
+        // Read responses in a loop
+        loop {
+            // Check for cancel before reading next response
+            if cancel_for_blocking.load(Ordering::Acquire) {
+                info!("Sidecar scan cancelled, sending Cancel to sidecar");
+                let _ = manager.send_cancel();
+                // Drain remaining responses until terminal
+                loop {
+                    match manager.read_response() {
+                        Ok(ref resp) if is_sidecar_terminal(resp) => break,
+                        Ok(_) => continue,
+                        Err(_) => break,
+                    }
+                }
+                manager.shutdown();
+                return Err(ScanError::Cancelled);
+            }
+
+            match manager.read_response() {
+                Ok(sidecar::SidecarResponse::ScanPage {
+                    page,
+                    width,
+                    height,
+                    bits_per_pixel,
+                    data,
+                }) => {
+                    // Decode base64 to raw bytes
+                    let raw_data = base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &data,
+                    )
+                    .map_err(|e| {
+                        ScanError::Sidecar(format!("Base64 decode error: {}", e))
+                    })?;
+
+                    let page_data = PageData {
+                        page_number: page,
+                        width,
+                        height,
+                        bits_per_pixel,
+                        dpi_x: resolution as f32,
+                        dpi_y: resolution as f32,
+                        raw_data,
+                    };
+                    let _ = page_tx.blocking_send(page_data);
+                }
+                Ok(sidecar::SidecarResponse::ScanProgress { .. }) => {
+                    // Progress is handled by the async side when it receives PageData
+                    continue;
+                }
+                Ok(sidecar::SidecarResponse::ScanComplete { .. }) => {
+                    break;
+                }
+                Ok(sidecar::SidecarResponse::Error { message }) => {
+                    manager.shutdown();
+                    return Err(ScanError::Sidecar(message));
+                }
+                Ok(_) => {
+                    // Unexpected response type, continue
+                    continue;
+                }
+                Err(e) => {
+                    manager.shutdown();
+                    return Err(e);
+                }
+            }
+        }
+
+        manager.shutdown();
+        Ok(())
+    });
+
+    // Process pages as they arrive (same pipeline as execute_native_scan)
+    let mut page_count = 0u32;
+    let mut all_pages: Vec<Vec<u8>> = Vec::new();
+
+    while let Some(page_data) = page_rx.recv().await {
+        if cancel_flag.load(Ordering::Acquire) {
+            info!("Page processing cancelled for sidecar scan {}", scan_id);
+            page_rx.close();
+            while page_rx.try_recv().is_ok() {}
+            break;
+        }
+
+        page_count += 1;
+
+        let _ = response_tx.send(AgentMessage::ScanProgress {
+            id: request_id.clone(),
+            scan_id: scan_id.clone(),
+            page: page_count,
+            status: ScanStatus::Scanning,
+        });
+
+        match format {
+            OutputFormat::Png => {
+                let png_data = page_data.to_png()?;
+                let encoded = base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &png_data,
+                );
+                let _ = response_tx.send(AgentMessage::ScanPage {
+                    id: request_id.clone(),
+                    scan_id: scan_id.clone(),
+                    page: page_count,
+                    data: encoded,
+                    mime: "image/png".to_string(),
+                });
+            }
+            OutputFormat::Jpeg => {
+                let jpeg_data = page_data.to_jpeg(85)?;
+                let encoded = base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &jpeg_data,
+                );
+                let _ = response_tx.send(AgentMessage::ScanPage {
+                    id: request_id.clone(),
+                    scan_id: scan_id.clone(),
+                    page: page_count,
+                    data: encoded,
+                    mime: "image/jpeg".to_string(),
+                });
+            }
+            OutputFormat::Pdf => {
+                let png_data = page_data.to_png()?;
+                all_pages.push(png_data);
+
+                let preview = page_data.to_jpeg(60)?;
+                let encoded = base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &preview,
+                );
+                let _ = response_tx.send(AgentMessage::ScanPage {
+                    id: request_id.clone(),
+                    scan_id: scan_id.clone(),
+                    page: page_count,
+                    data: encoded,
+                    mime: "image/jpeg".to_string(),
+                });
+            }
+        }
+    }
+
+    // Wait for sidecar task to complete
+    match sidecar_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            error!("Sidecar scan error: {}", e);
+            return Err(e);
+        }
+        Err(e) => {
+            error!("Sidecar task panicked: {}", e);
+            return Err(ScanError::Sidecar("Sidecar task panicked".into()));
+        }
+    }
+
+    // Generate PDF if requested
+    let pdf_data = if matches!(format, OutputFormat::Pdf) && !all_pages.is_empty() {
+        let _ = response_tx.send(AgentMessage::ScanProgress {
+            id: request_id.clone(),
+            scan_id: scan_id.clone(),
+            page: page_count,
+            status: ScanStatus::Processing,
+        });
+
+        match crate::pdf::generate_pdf(&all_pages) {
+            Ok(pdf_bytes) => Some(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &pdf_bytes,
+            )),
+            Err(e) => {
+                error!("PDF generation failed: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let _ = response_tx.send(AgentMessage::ScanComplete {
+        id: request_id,
+        scan_id,
+        total_pages: page_count,
+        pdf_data,
+    });
+
+    Ok(())
+}
+
+/// Check if a sidecar response is terminal (scan finished or errored)
+fn is_sidecar_terminal(resp: &sidecar::SidecarResponse) -> bool {
+    matches!(
+        resp,
+        sidecar::SidecarResponse::ScanComplete { .. }
+            | sidecar::SidecarResponse::Error { .. }
+            | sidecar::SidecarResponse::Shutdown
+    )
 }

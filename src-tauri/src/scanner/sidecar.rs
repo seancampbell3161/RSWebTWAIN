@@ -4,7 +4,7 @@
 //! communicating via newline-delimited JSON over stdin/stdout.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -16,7 +16,6 @@ use super::{ScanError, ScannerInfo, ScannerSource};
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
-#[allow(dead_code)] // Variants defined for future sidecar scanning support
 enum SidecarCommand {
     ListScanners,
     Scan {
@@ -33,8 +32,8 @@ enum SidecarCommand {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[allow(dead_code)] // Variants/fields defined for future sidecar scanning support
-enum SidecarResponse {
+#[allow(dead_code)] // Deserialized fields matched with `..` patterns
+pub(crate) enum SidecarResponse {
     ScannerList {
         scanners: Vec<SidecarScannerEntry>,
     },
@@ -60,10 +59,10 @@ enum SidecarResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct SidecarScannerEntry {
-    id: String,
-    name: String,
-    manufacturer: String,
+pub(crate) struct SidecarScannerEntry {
+    pub id: String,
+    pub name: String,
+    pub manufacturer: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -72,6 +71,7 @@ struct SidecarScannerEntry {
 
 pub struct SidecarManager {
     child: Option<Child>,
+    reader: Option<BufReader<ChildStdout>>,
     sidecar_path: String,
 }
 
@@ -79,6 +79,7 @@ impl SidecarManager {
     pub fn new(sidecar_path: String) -> Self {
         Self {
             child: None,
+            reader: None,
             sidecar_path,
         }
     }
@@ -91,13 +92,19 @@ impl SidecarManager {
 
         info!("Spawning 32-bit sidecar: {}", self.sidecar_path);
 
-        let child = Command::new(&self.sidecar_path)
+        let mut child = Command::new(&self.sidecar_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| ScanError::Sidecar(format!("Failed to spawn sidecar: {}", e)))?;
 
+        // Take stdout from child and wrap in BufReader for persistent buffering
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ScanError::Sidecar("Sidecar stdout not available".into()))?;
+        self.reader = Some(BufReader::new(stdout));
         self.child = Some(child);
 
         // Wait for the Ready signal
@@ -120,10 +127,12 @@ impl SidecarManager {
                 Ok(None) => true,  // Still running
                 Ok(Some(_)) => {
                     self.child = None;
+                    self.reader = None;
                     false
                 }
                 Err(_) => {
                     self.child = None;
+                    self.reader = None;
                     false
                 }
             }
@@ -159,19 +168,13 @@ impl SidecarManager {
     }
 
     /// Read a response from the sidecar
-    fn read_response(&mut self) -> Result<SidecarResponse, ScanError> {
-        let child = self
-            .child
+    pub(crate) fn read_response(&mut self) -> Result<SidecarResponse, ScanError> {
+        let reader = self
+            .reader
             .as_mut()
-            .ok_or_else(|| ScanError::Sidecar("Sidecar not running".into()))?;
-
-        let stdout = child
-            .stdout
-            .as_mut()
-            .ok_or_else(|| ScanError::Sidecar("Sidecar stdout not available".into()))?;
+            .ok_or_else(|| ScanError::Sidecar("Sidecar stdout reader not available".into()))?;
 
         let mut line = String::new();
-        let mut reader = BufReader::new(stdout);
         reader
             .read_line(&mut line)
             .map_err(|e| ScanError::Sidecar(format!("Failed to read from sidecar: {}", e)))?;
@@ -208,11 +211,40 @@ impl SidecarManager {
         }
     }
 
+    /// Start a scan on the sidecar. After calling this, read responses
+    /// with `read_response()` in a loop until `ScanComplete` or `Error`.
+    pub fn start_scan(
+        &mut self,
+        scanner_name: &str,
+        resolution: u32,
+        color_mode: &str,
+        duplex: bool,
+        use_adf: bool,
+        show_ui: bool,
+    ) -> Result<(), ScanError> {
+        self.send_command(&SidecarCommand::Scan {
+            scanner_name: scanner_name.to_string(),
+            resolution,
+            color_mode: color_mode.to_string(),
+            duplex,
+            use_adf,
+            show_ui,
+        })
+    }
+
+    /// Send a cancel command to the sidecar during an active scan.
+    pub fn send_cancel(&mut self) -> Result<(), ScanError> {
+        self.send_command(&SidecarCommand::Cancel)
+    }
+
     /// Shutdown the sidecar process
     pub fn shutdown(&mut self) {
         if let Err(e) = self.send_command(&SidecarCommand::Shutdown) {
             warn!("Failed to send shutdown to sidecar: {}", e);
         }
+
+        // Drop reader before waiting on child
+        self.reader = None;
 
         if let Some(mut child) = self.child.take() {
             let _ = child.wait();
