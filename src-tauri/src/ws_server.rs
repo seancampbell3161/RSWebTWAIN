@@ -161,7 +161,7 @@ async fn handle_connection(
                         Some(msg) => {
                             if let Ok(json) = serde_json::to_string(&msg) {
                                 let mut tx = ws_tx_responses.lock().await;
-                                if tx.send(Message::Text(json.into())).await.is_err() {
+                                if tx.send(Message::Text(json)).await.is_err() {
                                     break;
                                 }
                             }
@@ -183,7 +183,7 @@ async fn handle_connection(
                         Ok(msg) => {
                             if let Ok(json) = serde_json::to_string(&msg) {
                                 let mut tx = ws_tx_events.lock().await;
-                                if tx.send(Message::Text(json.into())).await.is_err() {
+                                if tx.send(Message::Text(json)).await.is_err() {
                                     break;
                                 }
                             }
@@ -208,7 +208,7 @@ async fn handle_connection(
             tokio::select! {
                 _ = interval.tick() => {
                     let mut tx = ws_tx_ping.lock().await;
-                    if tx.send(Message::Ping(vec![].into())).await.is_err() {
+                    if tx.send(Message::Ping(vec![])).await.is_err() {
                         break;
                     }
                 }
@@ -238,7 +238,7 @@ async fn handle_connection(
                         };
                         if let Ok(json) = serde_json::to_string(&error_msg) {
                             let mut tx = ws_tx.lock().await;
-                            let _ = tx.send(Message::Text(json.into())).await;
+                            let _ = tx.send(Message::Text(json)).await;
                         }
                     }
                 }
@@ -272,6 +272,7 @@ async fn handle_connection(
 }
 
 /// Validate the WebSocket handshake: origin + auth token.
+#[allow(clippy::result_large_err)]
 fn validate_handshake(
     req: &Request,
     config: &WsServerConfig,

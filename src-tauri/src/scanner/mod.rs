@@ -212,7 +212,7 @@ impl ScanOrchestrator {
             .iter()
             .find(|s| s.name == scanner_name || s.id == scanner_name)
             .cloned()
-            .ok_or_else(|| ScanError::ScannerNotFound(scanner_name))
+            .ok_or(ScanError::ScannerNotFound(scanner_name))
     }
 
     fn discover_native_scanners(&self) -> Result<Vec<ScannerInfo>, ScanError> {

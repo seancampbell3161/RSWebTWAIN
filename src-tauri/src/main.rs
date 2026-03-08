@@ -194,13 +194,11 @@ fn main() {
                                 info!("Autostart disabled");
                                 let _ = autostart_item.set_text("Start with Windows");
                             }
+                        } else if let Err(e) = manager.enable() {
+                            error!("Failed to enable autostart: {}", e);
                         } else {
-                            if let Err(e) = manager.enable() {
-                                error!("Failed to enable autostart: {}", e);
-                            } else {
-                                info!("Autostart enabled");
-                                let _ = autostart_item.set_text("✓ Start with Windows");
-                            }
+                            info!("Autostart enabled");
+                            let _ = autostart_item.set_text("✓ Start with Windows");
                         }
                     }
                     "about" => {

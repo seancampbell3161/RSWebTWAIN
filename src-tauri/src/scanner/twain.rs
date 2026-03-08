@@ -247,6 +247,12 @@ impl DsmHandle {
 
 pub struct PreSession;
 
+impl Default for PreSession {
+    fn default() -> Self {
+        Self
+    }
+}
+
 impl PreSession {
     pub fn new() -> Self {
         Self
@@ -441,9 +447,11 @@ impl DsmOpened {
             .find(|s| s.name == source_name)
             .ok_or(TwainError::NoSources)?;
 
-        let mut identity = TW_IDENTITY::default();
-        identity.Id = source.id;
-        identity.ProductName = str_to_tw_str32(&source.name);
+        let mut identity = TW_IDENTITY {
+            Id: source.id,
+            ProductName: str_to_tw_str32(&source.name),
+            ..Default::default()
+        };
 
         info!("Opening data source: {}", source.name);
 
