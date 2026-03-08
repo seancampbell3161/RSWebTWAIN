@@ -379,3 +379,47 @@ fn from_hex(hi: u8, lo: u8) -> Option<u8> {
     };
     Some(h << 4 | l)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_token_basic() {
+        assert_eq!(
+            parse_token_from_query("token=abc123"),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_token_among_params() {
+        assert_eq!(
+            parse_token_from_query("foo=bar&token=secret&baz=1"),
+            Some("secret".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_token_missing() {
+        assert_eq!(parse_token_from_query("foo=bar"), None);
+    }
+
+    #[test]
+    fn parse_token_percent_encoded() {
+        assert_eq!(
+            parse_token_from_query("token=hello%20world"),
+            Some("hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn percent_decode_special_chars() {
+        assert_eq!(percent_decode("a%2Fb%3Dc"), "a/b=c");
+    }
+
+    #[test]
+    fn percent_decode_passthrough() {
+        assert_eq!(percent_decode("no-encoding"), "no-encoding");
+    }
+}

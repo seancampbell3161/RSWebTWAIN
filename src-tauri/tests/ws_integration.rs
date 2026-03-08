@@ -5,6 +5,7 @@
 
 use futures_util::{SinkExt, StreamExt};
 use scan_agent_lib::ws_server::{self, WsServerConfig};
+use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::tungstenite::Message;
 
 /// Find an available port by binding to port 0
@@ -177,6 +178,246 @@ async fn multiple_clients_can_connect() {
 
     assert_eq!(v1["id"], "c1");
     assert_eq!(v2["id"], "c2");
+
+    handler.abort();
+}
+
+// ============================================================
+// Auth token tests
+// ============================================================
+
+#[tokio::test]
+async fn auth_token_valid_connects() {
+    let port = get_free_port().await;
+    let config = WsServerConfig {
+        port,
+        allowed_origins: Vec::new(),
+        auth_token: Some("secret".to_string()),
+    };
+
+    let handle = ws_server::start_server(config).await.unwrap();
+    let event_tx = handle.event_tx.clone();
+    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
+
+    let url = format!("ws://127.0.0.1:{}/?token=secret", port);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut tx, mut rx) = ws_stream.split();
+
+    tx.send(Message::Text(r#"{"type":"ping","id":"auth-1"}"#.into()))
+        .await
+        .unwrap();
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), rx.next())
+        .await
+        .expect("Timeout")
+        .expect("Stream ended")
+        .expect("WS error");
+
+    let v: serde_json::Value = serde_json::from_str(&response.into_text().unwrap()).unwrap();
+    assert_eq!(v["type"], "pong");
+    assert_eq!(v["id"], "auth-1");
+
+    handler.abort();
+}
+
+#[tokio::test]
+async fn auth_token_invalid_rejected() {
+    let port = get_free_port().await;
+    let config = WsServerConfig {
+        port,
+        allowed_origins: Vec::new(),
+        auth_token: Some("secret".to_string()),
+    };
+
+    let handle = ws_server::start_server(config).await.unwrap();
+    let _handler = tokio::spawn(scan_agent_lib::command_handler(
+        handle.command_rx,
+        handle.event_tx.clone(),
+        None,
+    ));
+
+    let url = format!("ws://127.0.0.1:{}/?token=wrong", port);
+    let result = tokio_tungstenite::connect_async(&url).await;
+
+    match result {
+        Err(tungstenite::Error::Http(resp)) => {
+            assert_eq!(resp.status(), 401);
+        }
+        other => panic!("Expected HTTP 401 error, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn auth_token_missing_rejected() {
+    let port = get_free_port().await;
+    let config = WsServerConfig {
+        port,
+        allowed_origins: Vec::new(),
+        auth_token: Some("secret".to_string()),
+    };
+
+    let handle = ws_server::start_server(config).await.unwrap();
+    let _handler = tokio::spawn(scan_agent_lib::command_handler(
+        handle.command_rx,
+        handle.event_tx.clone(),
+        None,
+    ));
+
+    let url = format!("ws://127.0.0.1:{}", port);
+    let result = tokio_tungstenite::connect_async(&url).await;
+
+    match result {
+        Err(tungstenite::Error::Http(resp)) => {
+            assert_eq!(resp.status(), 401);
+        }
+        other => panic!("Expected HTTP 401 error, got: {:?}", other),
+    }
+}
+
+// ============================================================
+// Origin validation tests
+// ============================================================
+
+/// Build a WebSocket client request with an explicit Origin header.
+fn ws_request_with_origin(port: u16, origin: &str) -> tungstenite::http::Request<()> {
+    tungstenite::http::Request::builder()
+        .uri(format!("ws://127.0.0.1:{}", port))
+        .header("Host", format!("127.0.0.1:{}", port))
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tungstenite::handshake::client::generate_key(),
+        )
+        .header("Origin", origin)
+        .body(())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn origin_allowed_connects() {
+    let port = get_free_port().await;
+    let config = WsServerConfig {
+        port,
+        allowed_origins: vec!["https://app.example.com".to_string()],
+        auth_token: None,
+    };
+
+    let handle = ws_server::start_server(config).await.unwrap();
+    let event_tx = handle.event_tx.clone();
+    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
+
+    let req = ws_request_with_origin(port, "https://app.example.com");
+    let (ws_stream, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    let (mut tx, mut rx) = ws_stream.split();
+
+    tx.send(Message::Text(r#"{"type":"ping","id":"origin-1"}"#.into()))
+        .await
+        .unwrap();
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), rx.next())
+        .await
+        .expect("Timeout")
+        .expect("Stream ended")
+        .expect("WS error");
+
+    let v: serde_json::Value = serde_json::from_str(&response.into_text().unwrap()).unwrap();
+    assert_eq!(v["type"], "pong");
+    assert_eq!(v["id"], "origin-1");
+
+    handler.abort();
+}
+
+#[tokio::test]
+async fn origin_disallowed_rejected() {
+    let port = get_free_port().await;
+    let config = WsServerConfig {
+        port,
+        allowed_origins: vec!["https://app.example.com".to_string()],
+        auth_token: None,
+    };
+
+    let handle = ws_server::start_server(config).await.unwrap();
+    let _handler = tokio::spawn(scan_agent_lib::command_handler(
+        handle.command_rx,
+        handle.event_tx.clone(),
+        None,
+    ));
+
+    let req = ws_request_with_origin(port, "https://evil.example.com");
+    let result = tokio_tungstenite::connect_async(req).await;
+
+    match result {
+        Err(tungstenite::Error::Http(resp)) => {
+            assert_eq!(resp.status(), 403);
+        }
+        other => panic!("Expected HTTP 403 error, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn origin_missing_rejected() {
+    let port = get_free_port().await;
+    let config = WsServerConfig {
+        port,
+        allowed_origins: vec!["https://app.example.com".to_string()],
+        auth_token: None,
+    };
+
+    let handle = ws_server::start_server(config).await.unwrap();
+    let _handler = tokio::spawn(scan_agent_lib::command_handler(
+        handle.command_rx,
+        handle.event_tx.clone(),
+        None,
+    ));
+
+    // connect_async with a plain URL does not send an Origin header
+    let url = format!("ws://127.0.0.1:{}", port);
+    let result = tokio_tungstenite::connect_async(&url).await;
+
+    match result {
+        Err(tungstenite::Error::Http(resp)) => {
+            assert_eq!(resp.status(), 403);
+        }
+        other => panic!("Expected HTTP 403 error, got: {:?}", other),
+    }
+}
+
+// ============================================================
+// Cancel scan error path
+// ============================================================
+
+#[tokio::test]
+async fn cancel_unknown_scan_returns_error() {
+    let port = get_free_port().await;
+    let config = WsServerConfig {
+        port,
+        allowed_origins: Vec::new(),
+        auth_token: None,
+    };
+
+    let handle = ws_server::start_server(config).await.unwrap();
+    let event_tx = handle.event_tx.clone();
+    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
+
+    let url = format!("ws://127.0.0.1:{}", port);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut tx, mut rx) = ws_stream.split();
+
+    let cancel_msg = r#"{"type":"cancel_scan","id":"cancel-1","scan_id":"nonexistent"}"#;
+    tx.send(Message::Text(cancel_msg.into())).await.unwrap();
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), rx.next())
+        .await
+        .expect("Timeout")
+        .expect("Stream ended")
+        .expect("WS error");
+
+    let v: serde_json::Value = serde_json::from_str(&response.into_text().unwrap()).unwrap();
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["id"], "cancel-1");
+    assert_eq!(v["code"], "INVALID_REQUEST");
 
     handler.abort();
 }
