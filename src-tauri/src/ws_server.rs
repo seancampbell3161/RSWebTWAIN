@@ -288,14 +288,11 @@ fn validate_handshake(
             Some(origin) if config.allowed_origins.iter().any(|ao| ao == origin) => {}
             Some(origin) => {
                 warn!("Rejected connection from unauthorized origin: {}", origin);
-                let reject = tokio_tungstenite::tungstenite::http::Response::builder()
-                    .status(403)
-                    .body(Some("Forbidden: Origin not allowed".to_string()))
-                    .unwrap();
-                return Err(reject);
+                return Err(reject_response(403, "Forbidden: Origin not allowed"));
             }
             None => {
-                // No origin header — could be a non-browser client, allow it
+                warn!("Rejected connection: missing Origin header");
+                return Err(reject_response(403, "Forbidden: Origin header required"));
             }
         }
     }
@@ -308,16 +305,30 @@ fn validate_handshake(
             Some(ref token) if token == expected => {}
             _ => {
                 warn!("Rejected connection: invalid or missing auth token");
-                let reject = tokio_tungstenite::tungstenite::http::Response::builder()
-                    .status(401)
-                    .body(Some("Unauthorized: Invalid or missing token".to_string()))
-                    .unwrap();
-                return Err(reject);
+                return Err(reject_response(401, "Unauthorized: Invalid or missing token"));
             }
         }
     }
 
     Ok(resp)
+}
+
+/// Build a rejection response for the WebSocket handshake.
+fn reject_response(
+    status: u16,
+    body: &str,
+) -> tokio_tungstenite::tungstenite::http::Response<Option<String>> {
+    tokio_tungstenite::tungstenite::http::Response::builder()
+        .status(status)
+        .body(Some(body.to_string()))
+        .unwrap_or_else(|_| {
+            // Fallback: if the builder somehow fails, return a bare 500
+            let mut resp = tokio_tungstenite::tungstenite::http::Response::new(Some(
+                "Internal Server Error".to_string(),
+            ));
+            *resp.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::INTERNAL_SERVER_ERROR;
+            resp
+        })
 }
 
 /// Extract and percent-decode the `token` value from a URI query string.
