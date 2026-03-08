@@ -4,11 +4,24 @@
 //! communicating via newline-delimited JSON over stdin/stdout.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::{ScanError, ScannerInfo, ScannerSource};
+
+/// Timeout for sidecar to send its initial Ready signal after spawn.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Timeout for reading a single response during normal operations.
+/// Generous to account for slow scanners at high DPI.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long to wait for the sidecar to exit gracefully after sending Shutdown.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // Sidecar IPC types (mirrors scanner-sidecar/src/main.rs protocol)
@@ -71,7 +84,8 @@ pub(crate) struct SidecarScannerEntry {
 
 pub struct SidecarManager {
     child: Option<Child>,
-    reader: Option<BufReader<ChildStdout>>,
+    response_rx: Option<mpsc::Receiver<Result<String, ScanError>>>,
+    reader_thread: Option<std::thread::JoinHandle<()>>,
     sidecar_path: String,
 }
 
@@ -79,7 +93,8 @@ impl SidecarManager {
     pub fn new(sidecar_path: String) -> Self {
         Self {
             child: None,
-            reader: None,
+            response_rx: None,
+            reader_thread: None,
             sidecar_path,
         }
     }
@@ -99,16 +114,54 @@ impl SidecarManager {
             .spawn()
             .map_err(|e| ScanError::Sidecar(format!("Failed to spawn sidecar: {}", e)))?;
 
-        // Take stdout from child and wrap in BufReader for persistent buffering
         let stdout = child
             .stdout
             .take()
             .ok_or_else(|| ScanError::Sidecar("Sidecar stdout not available".into()))?;
-        self.reader = Some(BufReader::new(stdout));
+
+        // Spawn a dedicated reader thread that sends lines through a channel.
+        // This lets read_response() use recv_timeout() instead of blocking forever.
+        let (tx, rx) = mpsc::channel();
+        let reader_thread = std::thread::Builder::new()
+            .name("sidecar-reader".into())
+            .spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => {
+                            // EOF — sidecar closed stdout
+                            let _ = tx.send(Err(ScanError::Sidecar(
+                                "Sidecar closed stdout (process exited)".into(),
+                            )));
+                            break;
+                        }
+                        Ok(_) => {
+                            if line.trim().is_empty() {
+                                continue;
+                            }
+                            if tx.send(Ok(line)).is_err() {
+                                // Receiver dropped — manager is shutting down
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(ScanError::Sidecar(
+                                format!("Failed to read from sidecar: {}", e),
+                            )));
+                            break;
+                        }
+                    }
+                }
+            })
+            .map_err(|e| ScanError::Sidecar(format!("Failed to spawn reader thread: {}", e)))?;
+
+        self.response_rx = Some(rx);
+        self.reader_thread = Some(reader_thread);
         self.child = Some(child);
 
-        // Wait for the Ready signal
-        let response = self.read_response()?;
+        // Wait for the Ready signal with a startup timeout
+        let response = self.read_response_with_timeout(STARTUP_TIMEOUT)?;
         match response {
             SidecarResponse::Ready => {
                 info!("Sidecar is ready");
@@ -126,18 +179,25 @@ impl SidecarManager {
             match child.try_wait() {
                 Ok(None) => true,  // Still running
                 Ok(Some(_)) => {
-                    self.child = None;
-                    self.reader = None;
+                    self.cleanup_dead_sidecar();
                     false
                 }
                 Err(_) => {
-                    self.child = None;
-                    self.reader = None;
+                    self.cleanup_dead_sidecar();
                     false
                 }
             }
         } else {
             false
+        }
+    }
+
+    /// Clean up state after the sidecar process has exited.
+    fn cleanup_dead_sidecar(&mut self) {
+        self.child = None;
+        self.response_rx = None;
+        if let Some(thread) = self.reader_thread.take() {
+            let _ = thread.join();
         }
     }
 
@@ -167,21 +227,37 @@ impl SidecarManager {
         Ok(())
     }
 
-    /// Read a response from the sidecar
+    /// Read a response with the default timeout (120s, generous for slow scanners).
     pub(crate) fn read_response(&mut self) -> Result<SidecarResponse, ScanError> {
-        let reader = self
-            .reader
-            .as_mut()
+        self.read_response_with_timeout(RESPONSE_TIMEOUT)
+    }
+
+    /// Read a response with a custom timeout.
+    fn read_response_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<SidecarResponse, ScanError> {
+        let rx = self
+            .response_rx
+            .as_ref()
             .ok_or_else(|| ScanError::Sidecar("Sidecar stdout reader not available".into()))?;
 
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .map_err(|e| ScanError::Sidecar(format!("Failed to read from sidecar: {}", e)))?;
-
-        if line.trim().is_empty() {
-            return Err(ScanError::Sidecar("Empty response from sidecar".into()));
-        }
+        let line = match rx.recv_timeout(timeout) {
+            Ok(result) => result?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                error!("Sidecar response timed out after {:?}", timeout);
+                self.kill_sidecar();
+                return Err(ScanError::Sidecar(format!(
+                    "Sidecar response timed out after {}s",
+                    timeout.as_secs()
+                )));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(ScanError::Sidecar(
+                    "Sidecar reader disconnected (process likely crashed)".into(),
+                ));
+            }
+        };
 
         debug!("Received from sidecar: {}", line.trim());
 
@@ -237,17 +313,54 @@ impl SidecarManager {
         self.send_command(&SidecarCommand::Cancel)
     }
 
-    /// Shutdown the sidecar process
+    /// Kill the sidecar process immediately without graceful shutdown.
+    fn kill_sidecar(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            warn!("Killing sidecar process");
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.response_rx = None;
+        if let Some(thread) = self.reader_thread.take() {
+            let _ = thread.join();
+        }
+    }
+
+    /// Shutdown the sidecar process gracefully, with a timeout fallback to kill.
     pub fn shutdown(&mut self) {
+        if self.child.is_none() {
+            return;
+        }
+
+        // Send shutdown command (best effort)
         if let Err(e) = self.send_command(&SidecarCommand::Shutdown) {
             warn!("Failed to send shutdown to sidecar: {}", e);
         }
 
-        // Drop reader before waiting on child
-        self.reader = None;
+        // Drop receiver so reader thread can exit when sender side closes
+        self.response_rx = None;
 
+        // Wait for child with timeout, then kill if it doesn't exit
         if let Some(mut child) = self.child.take() {
-            let _ = child.wait();
+            let start = Instant::now();
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) if start.elapsed() < SHUTDOWN_TIMEOUT => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    _ => {
+                        warn!("Sidecar didn't exit within {:?}, killing", SHUTDOWN_TIMEOUT);
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(thread) = self.reader_thread.take() {
+            let _ = thread.join();
         }
     }
 }
