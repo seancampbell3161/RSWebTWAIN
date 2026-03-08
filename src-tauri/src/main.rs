@@ -22,6 +22,85 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 use tracing::{error, info, warn};
 
+/// Encrypt data using Windows DPAPI (current-user scope).
+#[cfg(windows)]
+fn dpapi_encrypt(plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
+    use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
+
+    let mut input = CRYPT_INTEGER_BLOB {
+        cbData: plaintext.len() as u32,
+        pbData: plaintext.as_ptr() as *mut u8,
+    };
+    let mut output = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
+
+    unsafe {
+        CryptProtectData(
+            &mut input,
+            None,
+            None,
+            None,
+            None,
+            0,
+            &mut output,
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+        let encrypted = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+        windows::Win32::Foundation::LocalFree(Some(
+            windows::Win32::Foundation::HLOCAL(output.pbData as *mut std::ffi::c_void),
+        ));
+        Ok(encrypted)
+    }
+}
+
+/// Decrypt data using Windows DPAPI (current-user scope).
+#[cfg(windows)]
+fn dpapi_decrypt(ciphertext: &[u8]) -> std::io::Result<Vec<u8>> {
+    use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
+
+    let mut input = CRYPT_INTEGER_BLOB {
+        cbData: ciphertext.len() as u32,
+        pbData: ciphertext.as_ptr() as *mut u8,
+    };
+    let mut output = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
+
+    unsafe {
+        CryptUnprotectData(
+            &mut input,
+            None,
+            None,
+            None,
+            None,
+            0,
+            &mut output,
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+        let decrypted = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+        windows::Win32::Foundation::LocalFree(Some(
+            windows::Win32::Foundation::HLOCAL(output.pbData as *mut std::ffi::c_void),
+        ));
+        Ok(decrypted)
+    }
+}
+
+#[cfg(not(windows))]
+fn dpapi_encrypt(plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
+    Ok(plaintext.to_vec())
+}
+
+#[cfg(not(windows))]
+#[allow(dead_code)]
+fn dpapi_decrypt(ciphertext: &[u8]) -> std::io::Result<Vec<u8>> {
+    Ok(ciphertext.to_vec())
+}
+
 fn main() {
     // Initialize logging
     tracing_subscriber::fmt()
@@ -50,7 +129,8 @@ fn main() {
                 let data_dir = app.path().app_data_dir()?;
                 std::fs::create_dir_all(&data_dir)?;
                 let token_path = data_dir.join("ws-token");
-                std::fs::write(&token_path, &token)?;
+                let encrypted = dpapi_encrypt(token.as_bytes())?;
+                std::fs::write(&token_path, &encrypted)?;
                 info!("Auth token written to {}", token_path.display());
                 Some(token)
             };
