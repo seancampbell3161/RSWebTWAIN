@@ -23,6 +23,17 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long to wait for the sidecar to exit gracefully after sending Shutdown.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Total spawn attempts (1 initial + 2 retries).
+#[allow(dead_code)] // wired into ensure_running in a follow-up task
+const SPAWN_RETRY_ATTEMPTS: u32 = 3;
+
+/// Backoffs between consecutive spawn attempts (length = SPAWN_RETRY_ATTEMPTS - 1).
+#[allow(dead_code)] // wired into ensure_running in a follow-up task
+const SPAWN_RETRY_BACKOFFS: [Duration; 2] = [
+    Duration::from_millis(250),
+    Duration::from_secs(1),
+];
+
 // ---------------------------------------------------------------------------
 // Sidecar IPC types (mirrors scanner-sidecar/src/main.rs protocol)
 // ---------------------------------------------------------------------------
@@ -76,6 +87,55 @@ pub(crate) struct SidecarScannerEntry {
     pub id: String,
     pub name: String,
     pub manufacturer: String,
+}
+
+// ---------------------------------------------------------------------------
+// Spawn retry policy
+// ---------------------------------------------------------------------------
+
+/// Classification for spawn-time failures used by `with_spawn_retry`.
+///
+/// `Retryable` covers transient failures (case a: `Command::spawn` failed;
+/// case b: sidecar exited before sending Ready). `Permanent` covers
+/// failures that won't be cured by retrying (case c: Ready timeout;
+/// case d: sidecar reported a startup error).
+#[allow(dead_code)] // wired into ensure_running in a follow-up task
+enum SpawnFailure {
+    Retryable(ScanError),
+    Permanent(ScanError),
+}
+
+/// Run `f` up to `SPAWN_RETRY_ATTEMPTS` times, sleeping `SPAWN_RETRY_BACKOFFS[i]`
+/// between attempts. Returns immediately on `Ok` or `Permanent` failure.
+#[allow(dead_code)] // wired into ensure_running in a follow-up task
+fn with_spawn_retry<F, T>(mut f: F) -> Result<T, ScanError>
+where
+    F: FnMut(u32) -> Result<T, SpawnFailure>,
+{
+    for attempt in 1..=SPAWN_RETRY_ATTEMPTS {
+        match f(attempt) {
+            Ok(value) => return Ok(value),
+            Err(SpawnFailure::Permanent(e)) => {
+                warn!("Sidecar spawn failed permanently: {}", e);
+                return Err(e);
+            }
+            Err(SpawnFailure::Retryable(e)) => {
+                if attempt == SPAWN_RETRY_ATTEMPTS {
+                    error!("Sidecar spawn failed after {} attempts: {}", attempt, e);
+                    return Err(e);
+                }
+                let backoff = SPAWN_RETRY_BACKOFFS[(attempt - 1) as usize];
+                warn!(
+                    "Sidecar spawn attempt {} failed: {}; retrying in {}ms",
+                    attempt,
+                    e,
+                    backoff.as_millis()
+                );
+                std::thread::sleep(backoff);
+            }
+        }
+    }
+    unreachable!("loop body always returns")
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +447,7 @@ impl Drop for SidecarManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
     fn with_env_appends_overrides_in_order() {
@@ -400,5 +461,64 @@ mod tests {
                 ("KEY2".to_string(), "val2".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn with_spawn_retry_succeeds_on_first_attempt() {
+        let calls = AtomicU32::new(0);
+        let result = with_spawn_retry(|_attempt| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, SpawnFailure>(42)
+        });
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn with_spawn_retry_succeeds_after_one_retryable_failure() {
+        let calls = AtomicU32::new(0);
+        let result = with_spawn_retry(|_attempt| {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Err(SpawnFailure::Retryable(ScanError::Sidecar("transient".into())))
+            } else {
+                Ok(7)
+            }
+        });
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn with_spawn_retry_exhausts_attempts_on_repeated_retryable() {
+        let calls = AtomicU32::new(0);
+        let result: Result<(), ScanError> = with_spawn_retry(|_attempt| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(SpawnFailure::Retryable(ScanError::Sidecar("never works".into())))
+        });
+        assert!(matches!(result, Err(ScanError::Sidecar(ref m)) if m.contains("never works")));
+        assert_eq!(calls.load(Ordering::SeqCst), SPAWN_RETRY_ATTEMPTS);
+    }
+
+    #[test]
+    fn with_spawn_retry_fails_fast_on_permanent() {
+        let calls = AtomicU32::new(0);
+        let result: Result<(), ScanError> = with_spawn_retry(|_attempt| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(SpawnFailure::Permanent(ScanError::Sidecar("broken".into())))
+        });
+        assert!(matches!(result, Err(ScanError::Sidecar(ref m)) if m.contains("broken")));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "should not retry on permanent");
+    }
+
+    #[test]
+    fn with_spawn_retry_passes_attempt_numbers() {
+        let seen = std::sync::Mutex::new(Vec::new());
+        let result: Result<(), ScanError> = with_spawn_retry(|attempt| {
+            seen.lock().unwrap().push(attempt);
+            Err(SpawnFailure::Retryable(ScanError::Sidecar("again".into())))
+        });
+        assert!(result.is_err());
+        assert_eq!(*seen.lock().unwrap(), vec![1, 2, 3]);
     }
 }
