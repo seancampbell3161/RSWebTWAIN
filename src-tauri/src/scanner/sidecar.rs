@@ -107,7 +107,8 @@ enum SpawnFailure {
 }
 
 /// Run `f` up to `SPAWN_RETRY_ATTEMPTS` times, sleeping `SPAWN_RETRY_BACKOFFS[i]`
-/// between attempts. Returns immediately on `Ok` or `Permanent` failure.
+/// between attempts. Returns on success, on Permanent failure, or after
+/// exhausting all attempts.
 fn with_spawn_retry<F, T>(mut f: F) -> Result<T, ScanError>
 where
     F: FnMut(u32) -> Result<T, SpawnFailure>,
@@ -348,6 +349,11 @@ impl SidecarManager {
     }
 
     /// Read a response with a custom timeout.
+    ///
+    /// On timeout, this kills the sidecar process before returning an error,
+    /// which means callers don't need to clean up the child themselves on
+    /// the timeout path. Other error paths (channel disconnect, JSON parse
+    /// failure) leave the child alone — caller is responsible for cleanup.
     fn read_response_with_timeout(
         &mut self,
         timeout: Duration,
