@@ -8,6 +8,12 @@ description = "Headless scanning agent bridging browser apps to TWAIN scanners"
 name = "scan_agent_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "fake_sidecar"
+path = "tests/bin/fake_sidecar.rs"
+test = false
+bench = false
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
