@@ -87,6 +87,7 @@ pub struct SidecarManager {
     response_rx: Option<mpsc::Receiver<Result<String, ScanError>>>,
     reader_thread: Option<std::thread::JoinHandle<()>>,
     sidecar_path: String,
+    env_overrides: Vec<(String, String)>,
 }
 
 impl SidecarManager {
@@ -96,7 +97,15 @@ impl SidecarManager {
             response_rx: None,
             reader_thread: None,
             sidecar_path,
+            env_overrides: Vec::new(),
         }
+    }
+
+    /// Add an environment variable that will be set on the sidecar child process.
+    /// Useful for forwarding RUST_LOG or for driving test fakes.
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env_overrides.push((key.into(), value.into()));
+        self
     }
 
     /// Spawn the sidecar process if not already running
@@ -107,10 +116,14 @@ impl SidecarManager {
 
         info!("Spawning 32-bit sidecar: {}", self.sidecar_path);
 
-        let mut child = Command::new(&self.sidecar_path)
-            .stdin(Stdio::piped())
+        let mut cmd = Command::new(&self.sidecar_path);
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (k, v) in &self.env_overrides {
+            cmd.env(k, v);
+        }
+        let mut child = cmd
             .spawn()
             .map_err(|e| ScanError::Sidecar(format!("Failed to spawn sidecar: {}", e)))?;
 
@@ -368,5 +381,24 @@ impl SidecarManager {
 impl Drop for SidecarManager {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_env_appends_overrides_in_order() {
+        let m = SidecarManager::new("/nonexistent/path".to_string())
+            .with_env("KEY1", "val1")
+            .with_env("KEY2", "val2");
+        assert_eq!(
+            m.env_overrides,
+            vec![
+                ("KEY1".to_string(), "val1".to_string()),
+                ("KEY2".to_string(), "val2".to_string()),
+            ]
+        );
     }
 }
