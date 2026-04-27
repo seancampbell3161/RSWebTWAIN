@@ -27,7 +27,7 @@ use tracing::{error, info, warn};
 fn dpapi_encrypt(plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
     use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
 
-    let mut input = CRYPT_INTEGER_BLOB {
+    let input = CRYPT_INTEGER_BLOB {
         cbData: plaintext.len() as u32,
         pbData: plaintext.as_ptr() as *mut u8,
     };
@@ -38,7 +38,7 @@ fn dpapi_encrypt(plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
 
     unsafe {
         CryptProtectData(
-            &mut input,
+            &input,
             None,
             None,
             None,
@@ -46,7 +46,7 @@ fn dpapi_encrypt(plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
             0,
             &mut output,
         )
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         let encrypted = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
         windows::Win32::Foundation::LocalFree(windows::Win32::Foundation::HLOCAL(
@@ -58,10 +58,11 @@ fn dpapi_encrypt(plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
 
 /// Decrypt data using Windows DPAPI (current-user scope).
 #[cfg(windows)]
+#[allow(dead_code)]
 fn dpapi_decrypt(ciphertext: &[u8]) -> std::io::Result<Vec<u8>> {
     use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
 
-    let mut input = CRYPT_INTEGER_BLOB {
+    let input = CRYPT_INTEGER_BLOB {
         cbData: ciphertext.len() as u32,
         pbData: ciphertext.as_ptr() as *mut u8,
     };
@@ -72,7 +73,7 @@ fn dpapi_decrypt(ciphertext: &[u8]) -> std::io::Result<Vec<u8>> {
 
     unsafe {
         CryptUnprotectData(
-            &mut input,
+            &input,
             None,
             None,
             None,
@@ -80,7 +81,7 @@ fn dpapi_decrypt(ciphertext: &[u8]) -> std::io::Result<Vec<u8>> {
             0,
             &mut output,
         )
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         let decrypted = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
         windows::Win32::Foundation::LocalFree(windows::Win32::Foundation::HLOCAL(
