@@ -113,6 +113,9 @@ pub async fn start_server(config: WsServerConfig) -> Result<WsServerHandle, Box<
     })
 }
 
+// tungstenite's handshake callback returns a Result whose Err carries a full
+// HTTP Response (~136 bytes) — outside our control, so accept the large variant.
+#[allow(clippy::result_large_err)]
 async fn handle_connection(
     stream: TcpStream,
     peer_addr: SocketAddr,

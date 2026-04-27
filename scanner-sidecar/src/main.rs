@@ -889,8 +889,10 @@ fn cleanup_disable_close(
 ) {
     use std::ptr;
 
-    let mut ui = TW_USERINTERFACE::default();
-    ui.hParent = hwnd as TW_HANDLE;
+    let mut ui = TW_USERINTERFACE {
+        hParent: hwnd as TW_HANDLE,
+        ..Default::default()
+    };
     let _ = unsafe {
         entry(
             app_id,
