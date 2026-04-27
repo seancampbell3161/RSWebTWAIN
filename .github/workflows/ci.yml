@@ -36,6 +36,9 @@ jobs:
       - name: Check sidecar
         run: cargo check -p scanner-sidecar
 
+      - name: Cross-check 32-bit sidecar (i686)
+        run: cargo check --target i686-pc-windows-msvc -p scanner-sidecar
+
       - name: Clippy
         run: cargo clippy -p scan-agent -p scanner-sidecar -- -D warnings
 
