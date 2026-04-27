@@ -24,15 +24,17 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Total spawn attempts (1 initial + 2 retries).
-#[allow(dead_code)] // wired into ensure_running in a follow-up task
 const SPAWN_RETRY_ATTEMPTS: u32 = 3;
 
 /// Backoffs between consecutive spawn attempts (length = SPAWN_RETRY_ATTEMPTS - 1).
-#[allow(dead_code)] // wired into ensure_running in a follow-up task
 const SPAWN_RETRY_BACKOFFS: [Duration; 2] = [
     Duration::from_millis(250),
     Duration::from_secs(1),
 ];
+
+/// Sentinel string the reader thread emits when stdout closes (sidecar exited).
+/// Used by `try_spawn_once` to classify a startup EOF as case (b) Retryable.
+const SIDECAR_EOF_MSG: &str = "Sidecar closed stdout (process exited)";
 
 // ---------------------------------------------------------------------------
 // Sidecar IPC types (mirrors scanner-sidecar/src/main.rs protocol)
@@ -99,7 +101,6 @@ pub(crate) struct SidecarScannerEntry {
 /// case b: sidecar exited before sending Ready). `Permanent` covers
 /// failures that won't be cured by retrying (case c: Ready timeout;
 /// case d: sidecar reported a startup error).
-#[allow(dead_code)] // wired into ensure_running in a follow-up task
 enum SpawnFailure {
     Retryable(ScanError),
     Permanent(ScanError),
@@ -107,7 +108,6 @@ enum SpawnFailure {
 
 /// Run `f` up to `SPAWN_RETRY_ATTEMPTS` times, sleeping `SPAWN_RETRY_BACKOFFS[i]`
 /// between attempts. Returns immediately on `Ok` or `Permanent` failure.
-#[allow(dead_code)] // wired into ensure_running in a follow-up task
 fn with_spawn_retry<F, T>(mut f: F) -> Result<T, ScanError>
 where
     F: FnMut(u32) -> Result<T, SpawnFailure>,
@@ -168,13 +168,28 @@ impl SidecarManager {
         self
     }
 
-    /// Spawn the sidecar process if not already running
+    /// Spawn the sidecar process if not already running. Retries transient
+    /// startup failures up to `SPAWN_RETRY_ATTEMPTS` times.
     pub fn ensure_running(&mut self) -> Result<(), ScanError> {
         if self.is_running() {
             return Ok(());
         }
 
-        info!("Spawning 32-bit sidecar: {}", self.sidecar_path);
+        with_spawn_retry(|attempt| self.try_spawn_once(attempt))
+    }
+
+    /// Single spawn attempt: launch the process, wire the reader thread,
+    /// wait for the Ready signal. Classifies failures as Retryable or Permanent.
+    fn try_spawn_once(&mut self, attempt: u32) -> Result<(), SpawnFailure> {
+        info!(
+            "Spawning 32-bit sidecar (attempt {}/{}): {}",
+            attempt, SPAWN_RETRY_ATTEMPTS, self.sidecar_path
+        );
+
+        // Clean up any half-spawned state from a previous failed attempt.
+        if self.child.is_some() {
+            self.cleanup_dead_sidecar();
+        }
 
         let mut cmd = Command::new(&self.sidecar_path);
         cmd.stdin(Stdio::piped())
@@ -183,17 +198,19 @@ impl SidecarManager {
         for (k, v) in &self.env_overrides {
             cmd.env(k, v);
         }
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| ScanError::Sidecar(format!("Failed to spawn sidecar: {}", e)))?;
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| ScanError::Sidecar("Sidecar stdout not available".into()))?;
+        // Case (a): spawn failure — retryable.
+        let mut child = cmd.spawn().map_err(|e| {
+            SpawnFailure::Retryable(ScanError::Sidecar(format!(
+                "Failed to spawn sidecar: {}",
+                e
+            )))
+        })?;
 
-        // Spawn a dedicated reader thread that sends lines through a channel.
-        // This lets read_response() use recv_timeout() instead of blocking forever.
+        let stdout = child.stdout.take().ok_or_else(|| {
+            SpawnFailure::Permanent(ScanError::Sidecar("Sidecar stdout not available".into()))
+        })?;
+
         let (tx, rx) = mpsc::channel();
         let reader_thread = std::thread::Builder::new()
             .name("sidecar-reader".into())
@@ -203,10 +220,7 @@ impl SidecarManager {
                     let mut line = String::new();
                     match reader.read_line(&mut line) {
                         Ok(0) => {
-                            // EOF — sidecar closed stdout
-                            let _ = tx.send(Err(ScanError::Sidecar(
-                                "Sidecar closed stdout (process exited)".into(),
-                            )));
+                            let _ = tx.send(Err(ScanError::Sidecar(SIDECAR_EOF_MSG.into())));
                             break;
                         }
                         Ok(_) => {
@@ -214,36 +228,64 @@ impl SidecarManager {
                                 continue;
                             }
                             if tx.send(Ok(line)).is_err() {
-                                // Receiver dropped — manager is shutting down
                                 break;
                             }
                         }
                         Err(e) => {
-                            let _ = tx.send(Err(ScanError::Sidecar(
-                                format!("Failed to read from sidecar: {}", e),
-                            )));
+                            let _ = tx.send(Err(ScanError::Sidecar(format!(
+                                "Failed to read from sidecar: {}",
+                                e
+                            ))));
                             break;
                         }
                     }
                 }
             })
-            .map_err(|e| ScanError::Sidecar(format!("Failed to spawn reader thread: {}", e)))?;
+            .map_err(|e| {
+                SpawnFailure::Permanent(ScanError::Sidecar(format!(
+                    "Failed to spawn reader thread: {}",
+                    e
+                )))
+            })?;
 
         self.response_rx = Some(rx);
         self.reader_thread = Some(reader_thread);
         self.child = Some(child);
 
-        // Wait for the Ready signal with a startup timeout
-        let response = self.read_response_with_timeout(STARTUP_TIMEOUT)?;
-        match response {
-            SidecarResponse::Ready => {
+        // Wait for Ready / Error / EOF and classify.
+        match self.read_response_with_timeout(STARTUP_TIMEOUT) {
+            Ok(SidecarResponse::Ready) => {
                 info!("Sidecar is ready");
                 Ok(())
             }
-            SidecarResponse::Error { message } => {
-                Err(ScanError::Sidecar(format!("Sidecar startup error: {}", message)))
+            Ok(SidecarResponse::Error { message }) => {
+                // Case (d) — permanent.
+                self.kill_sidecar();
+                Err(SpawnFailure::Permanent(ScanError::Sidecar(format!(
+                    "Sidecar startup error: {}",
+                    message
+                ))))
             }
-            _ => Err(ScanError::Sidecar("Unexpected sidecar response".into())),
+            Ok(_) => {
+                self.kill_sidecar();
+                Err(SpawnFailure::Permanent(ScanError::Sidecar(
+                    "Unexpected sidecar response at startup".into(),
+                )))
+            }
+            Err(e) => {
+                // The reader-thread EOF marker is the signal for case (b).
+                // Any other error (timeout, read failure) is permanent.
+                let is_retryable = matches!(
+                    &e,
+                    ScanError::Sidecar(msg) if msg.contains(SIDECAR_EOF_MSG)
+                );
+                self.cleanup_dead_sidecar();
+                if is_retryable {
+                    Err(SpawnFailure::Retryable(e))
+                } else {
+                    Err(SpawnFailure::Permanent(e))
+                }
+            }
         }
     }
 
