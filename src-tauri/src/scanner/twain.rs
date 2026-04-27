@@ -1180,7 +1180,7 @@ pub enum TransferResult {
 
 #[cfg(windows)]
 pub fn create_hidden_hwnd() -> TwainResult<isize> {
-    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, RegisterClassW, HWND_MESSAGE,
         WNDCLASSW, WS_OVERLAPPED,
@@ -1188,15 +1188,27 @@ pub fn create_hidden_hwnd() -> TwainResult<isize> {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::core::w;
 
+    // Thin extern "system" shim: WNDCLASSW.lpfnWndProc is a raw fn pointer,
+    // but DefWindowProcW in windows-rs is a generic Rust fn — can't use directly.
+    unsafe extern "system" fn wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    }
+
     unsafe {
-        let hinstance = GetModuleHandleW(None)
+        let hmodule = GetModuleHandleW(None)
             .map_err(|e| TwainError::WindowCreationFailed(e.to_string()))?;
+        let hinstance: HINSTANCE = hmodule.into();
 
         let class_name = w!("RSWebTWAINTwainHidden");
 
         let wc = WNDCLASSW {
-            lpfnWndProc: Some(DefWindowProcW),
-            hInstance: hinstance.into(),
+            lpfnWndProc: Some(wnd_proc),
+            hInstance: hinstance,
             lpszClassName: class_name,
             ..Default::default()
         };
@@ -1209,9 +1221,9 @@ pub fn create_hidden_hwnd() -> TwainResult<isize> {
             w!("RSWebTWAIN TWAIN Window"),
             WS_OVERLAPPED,
             0, 0, 0, 0,
-            Some(HWND_MESSAGE),
+            HWND_MESSAGE,
             None,
-            Some(hinstance.into()),
+            hinstance,
             None,
         )
         .map_err(|e| TwainError::WindowCreationFailed(e.to_string()))?;
