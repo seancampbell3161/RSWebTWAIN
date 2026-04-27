@@ -94,3 +94,24 @@ fn ensure_running_gives_up_after_all_retries_fail() {
         .unwrap();
     assert_eq!(final_count, 3, "expected 3 spawn attempts, got {}", final_count);
 }
+
+#[test]
+fn ensure_running_fails_fast_on_explicit_error_response() {
+    let mut manager = SidecarManager::new(FAKE_SIDECAR.to_string())
+        .with_env("FAKE_SIDECAR_BEHAVIOR", "error");
+
+    let start = std::time::Instant::now();
+    let result = manager.ensure_running();
+    let elapsed = start.elapsed();
+
+    assert!(result.is_err(), "expected failure, got: {:?}", result);
+
+    // Permanent failure: no retries, no backoff. Should be well under the
+    // first backoff (250ms) — generous bound to keep the test stable on
+    // slow CI machines.
+    assert!(
+        elapsed < std::time::Duration::from_millis(2000),
+        "expected fast-fail (<2s), took {:?}",
+        elapsed
+    );
+}
