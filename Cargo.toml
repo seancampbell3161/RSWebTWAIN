@@ -1,3 +1,13 @@
 [workspace]
 members = ["src-tauri", "scanner-sidecar"]
 resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Sean Campbell"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/seancampbell3161/RSWebTWAIN"
+readme = "README.md"
+keywords = ["twain", "scanner", "tauri", "websocket", "windows"]
+categories = ["multimedia::images", "hardware-support"]

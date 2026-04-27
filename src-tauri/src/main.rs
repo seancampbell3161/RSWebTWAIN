@@ -1,11 +1,11 @@
-//! Scan Agent — Tauri v2 headless system tray application.
+//! RSWebTWAIN — Tauri v2 headless system tray application.
 //!
 //! Runs as a background process with a system tray icon, providing a WebSocket
 //! server on localhost for the Angular frontend to communicate with TWAIN scanners.
 //!
 //! Features:
 //! - System tray icon with context menu
-//! - Deep link protocol (`scan-agent://`) for wake-on-demand
+//! - Deep link protocol (`rswebtwain://`) for wake-on-demand
 //! - Autostart with Windows
 //! - WebSocket server for scanner control
 
@@ -110,7 +110,7 @@ fn main() {
         )
         .init();
 
-    info!("Scan Agent starting");
+    info!("RSWebTWAIN starting");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(
@@ -142,7 +142,7 @@ fn main() {
             };
 
             // --- System Tray ---
-            let quit = tauri::menu::MenuItem::with_id(app, "quit", "Quit Scan Agent", true, None::<&str>)?;
+            let quit = tauri::menu::MenuItem::with_id(app, "quit", "Quit RSWebTWAIN", true, None::<&str>)?;
             let status = tauri::menu::MenuItem::with_id(app, "status", "Status: Ready", false, None::<&str>)?;
             let autostart_toggle = tauri::menu::MenuItem::with_id(
                 app,
@@ -155,7 +155,7 @@ fn main() {
             let about = tauri::menu::MenuItem::with_id(
                 app,
                 "about",
-                "About Scan Agent",
+                "About RSWebTWAIN",
                 true,
                 None::<&str>,
             )?;
@@ -175,7 +175,7 @@ fn main() {
             let _tray = TrayIconBuilder::with_id("main")
                 .menu(&menu)
                 .show_menu_on_left_click(true)
-                .tooltip("Scan Agent - Ready")
+                .tooltip("RSWebTWAIN - Ready")
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "quit" => {
                         info!("Quit requested via tray menu");
@@ -205,14 +205,14 @@ fn main() {
                         let version = app.package_info().version.to_string();
                         app.dialog()
                             .message(format!(
-                                "Scan Agent v{}\n\n\
+                                "RSWebTWAIN v{}\n\n\
                                  A background scanning service that bridges\n\
                                  your web application to local TWAIN scanners.\n\n\
                                  WebSocket: ws://127.0.0.1:{}\n\
-                                 Protocol: scan-agent://",
+                                 Protocol: rswebtwain://",
                                 version, DEFAULT_WS_PORT
                             ))
-                            .title("About Scan Agent")
+                            .title("About RSWebTWAIN")
                             .kind(tauri_plugin_dialog::MessageDialogKind::Info)
                             .blocking_show();
                     }
@@ -227,7 +227,7 @@ fn main() {
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
-                if let Err(e) = app.deep_link().register("scan-agent") {
+                if let Err(e) = app.deep_link().register("rswebtwain") {
                     error!("Failed to register deep link: {}", e);
                 }
 
@@ -236,7 +236,7 @@ fn main() {
                     for url in event.urls() {
                         info!("Deep link received: {}", url);
 
-                        // Parse the URL: scan-agent://action?key=value&...
+                        // Parse the URL: rswebtwain://action?key=value&...
                         let action = if url.host_str().is_some() {
                             url.host_str().map(|s| s.to_string())
                         } else {
@@ -285,14 +285,14 @@ fn main() {
             }
 
             // --- WebSocket Server ---
-            let port: u16 = match std::env::var("SCAN_AGENT_PORT") {
+            let port: u16 = match std::env::var("RSWEBTWAIN_PORT") {
                 Ok(val) => match val.parse() {
                     Ok(p) => {
-                        info!("Using custom port from SCAN_AGENT_PORT: {}", p);
+                        info!("Using custom port from RSWEBTWAIN_PORT: {}", p);
                         p
                     }
                     Err(_) => {
-                        warn!("Invalid SCAN_AGENT_PORT '{}', using default {}", val, DEFAULT_WS_PORT);
+                        warn!("Invalid RSWEBTWAIN_PORT '{}', using default {}", val, DEFAULT_WS_PORT);
                         DEFAULT_WS_PORT
                     }
                 },
@@ -304,14 +304,14 @@ fn main() {
                 // In debug mode, allow all origins for easier development
                 Vec::new()
             } else {
-                match std::env::var("SCAN_AGENT_ALLOWED_ORIGINS") {
+                match std::env::var("RSWEBTWAIN_ALLOWED_ORIGINS") {
                     Ok(val) => {
                         let origins: Vec<String> = val
                             .split(',')
                             .map(|s| s.trim().to_string())
                             .filter(|s| !s.is_empty())
                             .collect();
-                        info!("Allowed origins from SCAN_AGENT_ALLOWED_ORIGINS: {:?}", origins);
+                        info!("Allowed origins from RSWEBTWAIN_ALLOWED_ORIGINS: {:?}", origins);
                         origins
                     }
                     Err(_) => {
@@ -352,9 +352,9 @@ fn main() {
                 }
             });
 
-            info!("Scan Agent setup complete");
+            info!("RSWebTWAIN setup complete");
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running scan agent");
+        .expect("error while running RSWebTWAIN");
 }

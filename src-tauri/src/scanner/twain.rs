@@ -281,9 +281,9 @@ impl PreSession {
         app_identity.ProtocolMajor = TWON_PROTOCOLMAJOR;
         app_identity.ProtocolMinor = TWON_PROTOCOLMINOR;
         app_identity.SupportedGroups = DG_CONTROL | DG_IMAGE;
-        app_identity.Manufacturer = str_to_tw_str32("ScanAgent");
+        app_identity.Manufacturer = str_to_tw_str32("RSWebTWAIN");
         app_identity.ProductFamily = str_to_tw_str32("Scanner");
-        app_identity.ProductName = str_to_tw_str32("Scan Agent");
+        app_identity.ProductName = str_to_tw_str32("RSWebTWAIN");
 
         info!("TWAINDSM.dll loaded successfully");
 
@@ -1192,7 +1192,7 @@ pub fn create_hidden_hwnd() -> TwainResult<isize> {
         let hinstance = GetModuleHandleW(None)
             .map_err(|e| TwainError::WindowCreationFailed(e.to_string()))?;
 
-        let class_name = w!("ScanAgentTwainHidden");
+        let class_name = w!("RSWebTWAINTwainHidden");
 
         let wc = WNDCLASSW {
             lpfnWndProc: Some(DefWindowProcW),
@@ -1206,7 +1206,7 @@ pub fn create_hidden_hwnd() -> TwainResult<isize> {
         let hwnd = CreateWindowExW(
             Default::default(),
             class_name,
-            w!("ScanAgent TWAIN Window"),
+            w!("RSWebTWAIN TWAIN Window"),
             WS_OVERLAPPED,
             0, 0, 0, 0,
             Some(HWND_MESSAGE),

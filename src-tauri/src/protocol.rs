@@ -109,7 +109,7 @@ pub enum AgentMessage {
     ServerShutdown,
     DeepLink {
         url: String,
-        /// The host/action portion of the deep link (e.g., "scan" from scan-agent://scan?...)
+        /// The host/action portion of the deep link (e.g., "scan" from rswebtwain://scan?...)
         #[serde(skip_serializing_if = "Option::is_none")]
         action: Option<String>,
         /// Query parameters parsed from the deep link URL

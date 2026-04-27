@@ -194,9 +194,9 @@ fn handle_list_scanners() {
     app_id.ProtocolMajor = TWON_PROTOCOLMAJOR;
     app_id.ProtocolMinor = TWON_PROTOCOLMINOR;
     app_id.SupportedGroups = DG_CONTROL | DG_IMAGE;
-    app_id.Manufacturer = str_to_tw_str32("ScanAgent");
+    app_id.Manufacturer = str_to_tw_str32("RSWebTWAIN");
     app_id.ProductFamily = str_to_tw_str32("Scanner");
-    app_id.ProductName = str_to_tw_str32("ScanAgent32");
+    app_id.ProductName = str_to_tw_str32("RSWebTWAIN32");
 
     // Create a hidden message window for TWAIN
     let hwnd = match create_message_window() {
@@ -348,9 +348,9 @@ fn handle_scan(
     app_id.ProtocolMajor = TWON_PROTOCOLMAJOR;
     app_id.ProtocolMinor = TWON_PROTOCOLMINOR;
     app_id.SupportedGroups = DG_CONTROL | DG_IMAGE;
-    app_id.Manufacturer = str_to_tw_str32("ScanAgent");
+    app_id.Manufacturer = str_to_tw_str32("RSWebTWAIN");
     app_id.ProductFamily = str_to_tw_str32("Scanner");
-    app_id.ProductName = str_to_tw_str32("ScanAgent32");
+    app_id.ProductName = str_to_tw_str32("RSWebTWAIN32");
 
     // --- Hidden message window ---
     let hwnd = match create_message_window() {
@@ -988,7 +988,7 @@ fn create_message_window() -> Result<isize, String> {
     unsafe {
         let hinstance = GetModuleHandleW(None).map_err(|e| e.to_string())?;
 
-        let class_name = w!("ScanAgent32Hidden");
+        let class_name = w!("RSWebTWAIN32Hidden");
 
         let wc = WNDCLASSW {
             lpfnWndProc: Some(DefWindowProcW),
@@ -1002,7 +1002,7 @@ fn create_message_window() -> Result<isize, String> {
         let hwnd = CreateWindowExW(
             Default::default(),
             class_name,
-            w!("ScanAgent32 TWAIN"),
+            w!("RSWebTWAIN32 TWAIN"),
             WS_OVERLAPPED,
             0,
             0,

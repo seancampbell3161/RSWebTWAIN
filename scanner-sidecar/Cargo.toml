@@ -1,8 +1,14 @@
 [package]
 name = "scanner-sidecar"
-version = "0.1.0"
-edition = "2021"
 description = "32-bit TWAIN scanner sidecar for legacy driver support"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "twain-scanner-32bit"
