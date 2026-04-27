@@ -49,8 +49,8 @@ fn dpapi_encrypt(plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
         let encrypted = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
-        windows::Win32::Foundation::LocalFree(Some(
-            windows::Win32::Foundation::HLOCAL(output.pbData as *mut std::ffi::c_void),
+        windows::Win32::Foundation::LocalFree(windows::Win32::Foundation::HLOCAL(
+            output.pbData as *mut std::ffi::c_void,
         ));
         Ok(encrypted)
     }
@@ -83,8 +83,8 @@ fn dpapi_decrypt(ciphertext: &[u8]) -> std::io::Result<Vec<u8>> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
         let decrypted = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
-        windows::Win32::Foundation::LocalFree(Some(
-            windows::Win32::Foundation::HLOCAL(output.pbData as *mut std::ffi::c_void),
+        windows::Win32::Foundation::LocalFree(windows::Win32::Foundation::HLOCAL(
+            output.pbData as *mut std::ffi::c_void,
         ));
         Ok(decrypted)
     }
