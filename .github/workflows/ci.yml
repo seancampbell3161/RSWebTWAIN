@@ -24,6 +24,12 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Create sidecar placeholder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          New-Item -ItemType File -Force -Path src-tauri/binaries/twain-scanner-32bit-x86_64-pc-windows-msvc.exe | Out-Null
+
       - name: Check main app
         run: cargo check -p scan-agent
 
@@ -43,6 +49,12 @@ jobs:
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+
+      - name: Create sidecar placeholder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          New-Item -ItemType File -Force -Path src-tauri/binaries/twain-scanner-32bit-x86_64-pc-windows-msvc.exe | Out-Null
 
       - name: Run tests
         run: cargo test -p scan-agent
