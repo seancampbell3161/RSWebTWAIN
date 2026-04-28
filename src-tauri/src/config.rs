@@ -69,3 +69,51 @@ pub fn apply_env_overrides(_config: &mut AgentConfig) {}
 pub fn write_template_if_missing(_config_path: &Path) -> std::io::Result<bool> {
     Ok(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(s: &str) -> AgentConfig {
+        toml::from_str(s).expect("valid TOML should parse")
+    }
+
+    #[test]
+    fn empty_input_yields_defaults() {
+        let cfg = parse("");
+        assert_eq!(cfg, AgentConfig::default());
+        assert_eq!(cfg.server.port, DEFAULT_PORT);
+        assert!(cfg.server.allow_localhost);
+        assert!(cfg.server.extra_origins.is_empty());
+    }
+
+    #[test]
+    fn empty_server_section_yields_field_defaults() {
+        let cfg = parse("[server]\n");
+        assert_eq!(cfg, AgentConfig::default());
+    }
+
+    #[test]
+    fn explicit_fields_override_defaults() {
+        let cfg = parse(r#"
+            [server]
+            port = 9000
+            allow_localhost = false
+            extra_origins = ["https://app.example.com"]
+        "#);
+        assert_eq!(cfg.server.port, 9000);
+        assert!(!cfg.server.allow_localhost);
+        assert_eq!(cfg.server.extra_origins, vec!["https://app.example.com".to_string()]);
+    }
+
+    #[test]
+    fn partial_server_section_uses_defaults_for_missing_fields() {
+        let cfg = parse(r#"
+            [server]
+            port = 9000
+        "#);
+        assert_eq!(cfg.server.port, 9000);
+        assert!(cfg.server.allow_localhost); // default
+        assert!(cfg.server.extra_origins.is_empty()); // default
+    }
+}
