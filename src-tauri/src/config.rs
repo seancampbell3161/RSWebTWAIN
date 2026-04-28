@@ -73,7 +73,37 @@ pub fn load_or_default(config_path: &Path) -> Result<AgentConfig, ConfigError> {
     Ok(cfg)
 }
 
-pub fn apply_env_overrides(_config: &mut AgentConfig) {}
+pub fn apply_env_overrides(config: &mut AgentConfig) {
+    if let Ok(val) = std::env::var("RSWEBTWAIN_PORT") {
+        match val.parse::<u16>() {
+            Ok(p) if p > 0 => {
+                tracing::info!("Port overridden by RSWEBTWAIN_PORT: {p}");
+                config.server.port = p;
+            }
+            _ => tracing::warn!(
+                "Invalid RSWEBTWAIN_PORT '{val}' (expected 1-65535); keeping config value {}",
+                config.server.port,
+            ),
+        }
+    }
+
+    if let Ok(val) = std::env::var("RSWEBTWAIN_ALLOWED_ORIGINS") {
+        let parsed: Vec<String> = val
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !parsed.is_empty() {
+            tracing::info!(
+                "Origin policy overridden by RSWEBTWAIN_ALLOWED_ORIGINS \
+                 ({} entries; localhost magic disabled)",
+                parsed.len(),
+            );
+            config.server.allow_localhost = false;
+            config.server.extra_origins = parsed;
+        }
+    }
+}
 
 pub fn write_template_if_missing(_config_path: &Path) -> std::io::Result<bool> {
     Ok(false)
@@ -254,5 +284,83 @@ mod tests {
         let path = write_file(&dir, "bad.toml", "[server]\nport = 0\n");
         let err = load_or_default(&path).unwrap_err();
         assert!(matches!(err, ConfigError::Invalid(_)), "got {err:?}");
+    }
+
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Run `f` with each `(name, Some(val))` set and each `(name, None)` removed,
+    /// then restore the original values. Serialised against other env-var tests.
+    fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let originals: Vec<_> = vars.iter().map(|(k, _)| (*k, std::env::var(k).ok())).collect();
+        for (k, v) in vars {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        for (k, original) in originals {
+            match original {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+        if let Err(e) = result { std::panic::resume_unwind(e); }
+    }
+
+    #[test]
+    fn env_port_override_applies() {
+        with_env(&[("RSWEBTWAIN_PORT", Some("9000")), ("RSWEBTWAIN_ALLOWED_ORIGINS", None)], || {
+            let mut cfg = AgentConfig::default();
+            apply_env_overrides(&mut cfg);
+            assert_eq!(cfg.server.port, 9000);
+        });
+    }
+
+    #[test]
+    fn env_port_invalid_keeps_config_value() {
+        with_env(&[("RSWEBTWAIN_PORT", Some("not-a-number")), ("RSWEBTWAIN_ALLOWED_ORIGINS", None)], || {
+            let mut cfg = AgentConfig::default();
+            apply_env_overrides(&mut cfg);
+            assert_eq!(cfg.server.port, DEFAULT_PORT);
+        });
+    }
+
+    #[test]
+    fn env_port_zero_keeps_config_value() {
+        with_env(&[("RSWEBTWAIN_PORT", Some("0")), ("RSWEBTWAIN_ALLOWED_ORIGINS", None)], || {
+            let mut cfg = AgentConfig::default();
+            apply_env_overrides(&mut cfg);
+            assert_eq!(cfg.server.port, DEFAULT_PORT);
+        });
+    }
+
+    #[test]
+    fn env_origins_replace_full_policy_and_disable_localhost() {
+        with_env(&[
+            ("RSWEBTWAIN_PORT", None),
+            ("RSWEBTWAIN_ALLOWED_ORIGINS", Some("http://localhost:4200,https://app.example.com")),
+        ], || {
+            let mut cfg = AgentConfig::default();
+            assert!(cfg.server.allow_localhost); // sanity check
+            apply_env_overrides(&mut cfg);
+            assert!(!cfg.server.allow_localhost, "env override should disable localhost magic");
+            assert_eq!(
+                cfg.server.extra_origins,
+                vec!["http://localhost:4200".to_string(), "https://app.example.com".to_string()],
+            );
+        });
+    }
+
+    #[test]
+    fn env_origins_empty_string_is_ignored() {
+        with_env(&[("RSWEBTWAIN_PORT", None), ("RSWEBTWAIN_ALLOWED_ORIGINS", Some(""))], || {
+            let mut cfg = AgentConfig::default();
+            apply_env_overrides(&mut cfg);
+            assert!(cfg.server.allow_localhost, "empty env var should not change policy");
+            assert!(cfg.server.extra_origins.is_empty());
+        });
     }
 }
