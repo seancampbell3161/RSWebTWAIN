@@ -60,8 +60,17 @@ impl std::error::Error for ConfigError {
     }
 }
 
-pub fn load_or_default(_config_path: &Path) -> Result<AgentConfig, ConfigError> {
-    Ok(AgentConfig::default())
+pub fn load_or_default(config_path: &Path) -> Result<AgentConfig, ConfigError> {
+    let raw = match std::fs::read_to_string(config_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(AgentConfig::default());
+        }
+        Err(e) => return Err(ConfigError::Io(e)),
+    };
+    let cfg: AgentConfig = toml::from_str(&raw).map_err(ConfigError::Parse)?;
+    validate(&cfg)?;
+    Ok(cfg)
 }
 
 pub fn apply_env_overrides(_config: &mut AgentConfig) {}
@@ -70,8 +79,6 @@ pub fn write_template_if_missing(_config_path: &Path) -> std::io::Result<bool> {
     Ok(false)
 }
 
-#[allow(dead_code)]
-// used by load_or_default in the next task
 fn validate(cfg: &AgentConfig) -> Result<(), ConfigError> {
     if cfg.server.port == 0 {
         return Err(ConfigError::Invalid(
@@ -196,5 +203,56 @@ mod tests {
                 ..ServerConfig::default()
             },
         }).unwrap();
+    }
+
+    use std::io::Write;
+
+    fn tmpdir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("tempdir")
+    }
+
+    fn write_file(dir: &tempfile::TempDir, name: &str, contents: &str) -> std::path::PathBuf {
+        let p = dir.path().join(name);
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(contents.as_bytes()).unwrap();
+        p
+    }
+
+    #[test]
+    fn load_or_default_returns_defaults_when_file_missing() {
+        let dir = tmpdir();
+        let path = dir.path().join("nope.toml");
+        let cfg = load_or_default(&path).expect("missing file should not error");
+        assert_eq!(cfg, AgentConfig::default());
+    }
+
+    #[test]
+    fn load_or_default_returns_parsed_config() {
+        let dir = tmpdir();
+        let path = write_file(&dir, "config.toml", r#"
+            [server]
+            port = 9001
+            extra_origins = ["https://app.example.com"]
+        "#);
+        let cfg = load_or_default(&path).unwrap();
+        assert_eq!(cfg.server.port, 9001);
+        assert!(cfg.server.allow_localhost); // default kept
+        assert_eq!(cfg.server.extra_origins, vec!["https://app.example.com".to_string()]);
+    }
+
+    #[test]
+    fn load_or_default_returns_parse_error_for_bad_toml() {
+        let dir = tmpdir();
+        let path = write_file(&dir, "bad.toml", "this is = not = toml");
+        let err = load_or_default(&path).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn load_or_default_returns_invalid_for_bad_value() {
+        let dir = tmpdir();
+        let path = write_file(&dir, "bad.toml", "[server]\nport = 0\n");
+        let err = load_or_default(&path).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(_)), "got {err:?}");
     }
 }
