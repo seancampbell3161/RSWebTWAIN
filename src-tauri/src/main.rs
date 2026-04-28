@@ -285,30 +285,55 @@ fn main() {
                 info!("32-bit sidecar not found (32-bit-only scanners will be unavailable)");
             }
 
-            // --- WebSocket Server ---
-            let port: u16 = match std::env::var("RSWEBTWAIN_PORT") {
-                Ok(val) => match val.parse() {
-                    Ok(p) => {
-                        info!("Using custom port from RSWEBTWAIN_PORT: {}", p);
-                        p
-                    }
-                    Err(_) => {
-                        warn!("Invalid RSWEBTWAIN_PORT '{}', using default {}", val, DEFAULT_WS_PORT);
-                        DEFAULT_WS_PORT
-                    }
-                },
-                Err(_) => DEFAULT_WS_PORT,
-            };
+            // --- WebSocket Server config (port + origin policy) ---
+            use scan_agent_lib::config;
+            use scan_agent_lib::ws_server::OriginPolicy;
 
-            // TODO(Task 10): wire origin_policy from AgentConfig loaded by config module.
-            // For now use AllowAll in debug and a localhost-only Restricted in release.
-            let origin_policy = if cfg!(debug_assertions) {
-                ws_server::OriginPolicy::AllowAll
+            let (port, origin_policy) = if cfg!(debug_assertions) {
+                // Debug: skip the config file entirely; allow any origin.
+                (ws_server::DEFAULT_WS_PORT, OriginPolicy::AllowAll)
             } else {
-                ws_server::OriginPolicy::Restricted {
-                    allow_localhost: true,
-                    extra: Vec::new(),
+                let config_path = app
+                    .path()
+                    .app_data_dir()
+                    .map(|d| d.join("config.toml"))
+                    .unwrap_or_else(|e| {
+                        warn!("Could not resolve app_data_dir ({e}); falling back to current dir");
+                        std::path::PathBuf::from("config.toml")
+                    });
+
+                match config::write_template_if_missing(&config_path) {
+                    Ok(true) => info!("Default config template written to {}", config_path.display()),
+                    Ok(false) => {}
+                    Err(e) => warn!("Could not write config template at {}: {e}", config_path.display()),
                 }
+
+                let mut cfg = match config::load_or_default(&config_path) {
+                    Ok(c) => c,
+                    Err(config::ConfigError::Io(e)) => {
+                        warn!("Could not read {}: {e}; falling back to defaults", config_path.display());
+                        config::AgentConfig::default()
+                    }
+                    Err(e) => {
+                        error!("Invalid config at {}: {e}", config_path.display());
+                        std::process::exit(2);
+                    }
+                };
+
+                config::apply_env_overrides(&mut cfg);
+
+                if !cfg.server.allow_localhost && cfg.server.extra_origins.is_empty() {
+                    warn!(
+                        "Origin policy locks out localhost and has no extra origins; \
+                         agent will reject all WebSocket connections"
+                    );
+                }
+
+                let policy = OriginPolicy::Restricted {
+                    allow_localhost: cfg.server.allow_localhost,
+                    extra: cfg.server.extra_origins,
+                };
+                (cfg.server.port, policy)
             };
 
             let _app_handle = app.handle().clone();
