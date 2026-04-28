@@ -6,6 +6,7 @@
 //! - Message protocol types (`protocol`)
 //! - PDF generation (`pdf`)
 
+pub mod config;
 pub mod pdf;
 pub mod protocol;
 pub mod scanner;

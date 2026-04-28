@@ -18,13 +18,27 @@ use crate::protocol::{AgentMessage, ClientMessage};
 /// Default WebSocket port
 pub const DEFAULT_WS_PORT: u16 = 47115;
 
+/// Origin acceptance policy for the WebSocket handshake.
+#[derive(Debug, Clone)]
+pub enum OriginPolicy {
+    /// Accept any origin (and missing Origin headers). Dev-mode only.
+    AllowAll,
+    /// Accept localhost (when `allow_localhost`) plus exact matches in `extra`.
+    /// Production builds always use this variant.
+    Restricted {
+        /// Accept http(s)://localhost(:any-port), 127.0.0.1, and [::1].
+        allow_localhost: bool,
+        /// Additional exact-match origin strings (e.g., "https://app.example.com").
+        extra: Vec<String>,
+    },
+}
+
 /// Configuration for the WebSocket server
 #[derive(Debug, Clone)]
 pub struct WsServerConfig {
     pub port: u16,
-    /// Allowed origins for CORS-like validation (e.g., "https://your-app.example.com")
-    /// If empty, all origins are allowed (development mode).
-    pub allowed_origins: Vec<String>,
+    /// Origin acceptance policy. `AllowAll` is dev-only.
+    pub origin_policy: OriginPolicy,
     /// Auth token for WebSocket connections. If `Some`, clients must include `?token=<value>`
     /// in the connection URL. If `None`, no authentication is required (development mode).
     pub auth_token: Option<String>,
@@ -34,7 +48,7 @@ impl Default for WsServerConfig {
     fn default() -> Self {
         Self {
             port: DEFAULT_WS_PORT,
-            allowed_origins: Vec::new(),
+            origin_policy: OriginPolicy::AllowAll,
             auth_token: None,
         }
     }
@@ -282,21 +296,38 @@ fn validate_handshake(
     resp: Response,
 ) -> Result<Response, tokio_tungstenite::tungstenite::http::Response<Option<String>>> {
     // --- Origin validation ---
-    if !config.allowed_origins.is_empty() {
-        let origin = req
-            .headers()
-            .get("Origin")
-            .and_then(|v| v.to_str().ok());
-
-        match origin {
-            Some(origin) if config.allowed_origins.iter().any(|ao| ao == origin) => {}
-            Some(origin) => {
-                warn!("Rejected connection from unauthorized origin: {}", origin);
-                return Err(reject_response(403, "Forbidden: Origin not allowed"));
-            }
-            None => {
+    match &config.origin_policy {
+        OriginPolicy::AllowAll => {} // dev only — accept anything
+        OriginPolicy::Restricted { allow_localhost, extra } => {
+            let Some(origin_str) = req
+                .headers()
+                .get("Origin")
+                .and_then(|v| v.to_str().ok())
+            else {
                 warn!("Rejected connection: missing Origin header");
                 return Err(reject_response(403, "Forbidden: Origin header required"));
+            };
+
+            let parsed = match url::Url::parse(origin_str) {
+                Ok(u) => u,
+                Err(_) => {
+                    warn!("Rejected connection: malformed Origin '{}'", origin_str);
+                    return Err(reject_response(403, "Forbidden: Malformed Origin"));
+                }
+            };
+
+            // url::Url::host_str returns IPv6 addresses with brackets (e.g. "[::1]").
+            let host = parsed.host_str().unwrap_or("");
+            let scheme_ok = matches!(parsed.scheme(), "http" | "https");
+            let is_localhost = scheme_ok
+                && matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]");
+
+            let accepted = (*allow_localhost && is_localhost)
+                || extra.iter().any(|o| o == origin_str);
+
+            if !accepted {
+                warn!("Rejected connection from unauthorized origin: {}", origin_str);
+                return Err(reject_response(403, "Forbidden: Origin not allowed"));
             }
         }
     }
