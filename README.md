@@ -66,11 +66,45 @@ fake sidecar binary — no scanner hardware required.
 
 ## Configuration
 
-| Env var                       | Purpose                                       | Default  |
-|-------------------------------|-----------------------------------------------|----------|
-| `RSWEBTWAIN_PORT`             | WebSocket listen port                         | `47115`  |
-| `RSWEBTWAIN_ALLOWED_ORIGINS`  | Comma-separated allowed `Origin` headers      | (open)   |
-| `RUST_LOG`                    | `tracing` filter (e.g. `scan_agent=debug`)    | `info`   |
+The agent ships **safe-by-default**: with no configuration, it accepts WebSocket
+connections from any `http(s)://localhost`, `127.0.0.1`, or `[::1]` origin (any
+port) and rejects everything else. That covers most local-app scenarios — no
+edits required.
+
+### When to edit the config file
+
+Edit `%APPDATA%\com.rswebtwain.agent\config.toml` when you need to:
+
+- Allow a production frontend served from a real domain.
+- Lock down localhost (set `allow_localhost = false`).
+- Change the listening port.
+
+The file is created automatically on first run with every setting commented out.
+After editing, restart the agent (right-click tray → Quit, then relaunch).
+
+### Sample `config.toml`
+
+```toml
+[server]
+# port = 47115
+
+# Whether to accept connections from http(s)://localhost(:any-port), 127.0.0.1, or [::1].
+# allow_localhost = true
+
+# Additional exact-match origins (production frontends).
+# extra_origins = ["https://app.example.com"]
+```
+
+### Environment variables (override config file)
+
+| Variable                       | Description                                                                                                        | Default        |
+|--------------------------------|--------------------------------------------------------------------------------------------------------------------|----------------|
+| `RSWEBTWAIN_PORT`              | WebSocket listening port                                                                                           | `47115`        |
+| `RSWEBTWAIN_ALLOWED_ORIGINS`   | Comma-separated exact-match origins. **Replaces the entire policy** when set (sets `allow_localhost = false`)      | (config value) |
+| `RUST_LOG`                     | Logging filter (e.g., `scan_agent=debug`)                                                                          | (off)          |
+
+To keep localhost in the policy via env, list it explicitly:
+`RSWEBTWAIN_ALLOWED_ORIGINS="http://localhost:4200,https://app.example.com"`.
 
 ## Protocol
 
