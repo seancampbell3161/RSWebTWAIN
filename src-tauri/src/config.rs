@@ -70,6 +70,32 @@ pub fn write_template_if_missing(_config_path: &Path) -> std::io::Result<bool> {
     Ok(false)
 }
 
+#[allow(dead_code)]
+// used by load_or_default in the next task
+fn validate(cfg: &AgentConfig) -> Result<(), ConfigError> {
+    if cfg.server.port == 0 {
+        return Err(ConfigError::Invalid(
+            "port must be in the range 1-65535 (got 0)".to_string(),
+        ));
+    }
+    for o in &cfg.server.extra_origins {
+        let parsed = url::Url::parse(o).map_err(|_| {
+            ConfigError::Invalid(format!(
+                "extra origin '{o}' is not a valid URL (must include http:// or https:// scheme)"
+            ))
+        })?;
+        match parsed.scheme() {
+            "http" | "https" => {}
+            other => {
+                return Err(ConfigError::Invalid(format!(
+                    "extra origin '{o}' uses unsupported scheme '{other}' (expected http or https)"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +141,60 @@ mod tests {
         assert_eq!(cfg.server.port, 9000);
         assert!(cfg.server.allow_localhost); // default
         assert!(cfg.server.extra_origins.is_empty()); // default
+    }
+
+    #[test]
+    fn port_zero_is_invalid() {
+        let err = validate(&AgentConfig {
+            server: ServerConfig { port: 0, ..ServerConfig::default() },
+        }).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(ref m) if m.contains("port")), "got {err:?}");
+    }
+
+    #[test]
+    fn extra_origin_must_be_a_url() {
+        let err = validate(&AgentConfig {
+            server: ServerConfig {
+                extra_origins: vec!["not-a-url".to_string()],
+                ..ServerConfig::default()
+            },
+        }).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(ref m) if m.contains("not-a-url")), "got {err:?}");
+    }
+
+    #[test]
+    fn extra_origin_without_scheme_is_rejected() {
+        let err = validate(&AgentConfig {
+            server: ServerConfig {
+                extra_origins: vec!["app.example.com".to_string()],
+                ..ServerConfig::default()
+            },
+        }).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Invalid(ref m) if m.contains("scheme")),
+            "expected message mentioning scheme, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn extra_origin_with_ws_scheme_is_rejected() {
+        // Only http/https are valid web origin schemes.
+        let err = validate(&AgentConfig {
+            server: ServerConfig {
+                extra_origins: vec!["ws://app.example.com".to_string()],
+                ..ServerConfig::default()
+            },
+        }).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn valid_https_origin_passes() {
+        validate(&AgentConfig {
+            server: ServerConfig {
+                extra_origins: vec!["https://app.example.com".to_string()],
+                ..ServerConfig::default()
+            },
+        }).unwrap();
     }
 }
