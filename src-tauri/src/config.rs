@@ -7,6 +7,32 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+const TEMPLATE: &str = r#"# RSWebTWAIN agent configuration
+# Location: %APPDATA%\com.rswebtwain.agent\config.toml
+#
+# This file is OPTIONAL. With no config file, the agent accepts WebSocket
+# connections from any http(s)://localhost or 127.0.0.1 origin (any port)
+# and rejects everything else. That covers most local-app scenarios.
+#
+# Edit this file when you need to:
+#   - Allow a production frontend served from a real domain
+#   - Lock down localhost (set allow_localhost = false)
+#   - Change the listening port
+#
+# Environment variables (RSWEBTWAIN_PORT, RSWEBTWAIN_ALLOWED_ORIGINS) override these values.
+# RSWEBTWAIN_ALLOWED_ORIGINS, when set, REPLACES the entire origin policy
+# (sets allow_localhost = false). To keep localhost via env, list it explicitly.
+
+[server]
+# port = 47115
+
+# Whether to accept connections from http(s)://localhost(:any-port), 127.0.0.1, or [::1].
+# allow_localhost = true
+
+# Additional exact-match origins (production frontends).
+# extra_origins = ["https://app.example.com"]
+"#;
+
 pub const DEFAULT_PORT: u16 = 47115;
 
 #[derive(Debug, Deserialize, PartialEq, Default)]
@@ -105,8 +131,15 @@ pub fn apply_env_overrides(config: &mut AgentConfig) {
     }
 }
 
-pub fn write_template_if_missing(_config_path: &Path) -> std::io::Result<bool> {
-    Ok(false)
+pub fn write_template_if_missing(config_path: &Path) -> std::io::Result<bool> {
+    if config_path.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(config_path, TEMPLATE)?;
+    Ok(true)
 }
 
 fn validate(cfg: &AgentConfig) -> Result<(), ConfigError> {
@@ -362,5 +395,33 @@ mod tests {
             assert!(cfg.server.allow_localhost, "empty env var should not change policy");
             assert!(cfg.server.extra_origins.is_empty());
         });
+    }
+
+    #[test]
+    fn template_is_written_when_file_missing() {
+        let dir = tmpdir();
+        let path = dir.path().join("nested").join("config.toml");
+        let wrote = write_template_if_missing(&path).unwrap();
+        assert!(wrote, "should report it wrote a new file");
+        assert!(path.exists(), "file should now exist");
+    }
+
+    #[test]
+    fn template_is_skipped_when_file_present() {
+        let dir = tmpdir();
+        let path = write_file(&dir, "config.toml", "# pre-existing");
+        let wrote = write_template_if_missing(&path).unwrap();
+        assert!(!wrote, "should not overwrite existing file");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "# pre-existing");
+    }
+
+    #[test]
+    fn template_round_trips_to_default_config() {
+        let dir = tmpdir();
+        let path = dir.path().join("config.toml");
+        write_template_if_missing(&path).unwrap();
+        let cfg = load_or_default(&path).expect("template must parse cleanly");
+        assert_eq!(cfg, AgentConfig::default());
     }
 }
