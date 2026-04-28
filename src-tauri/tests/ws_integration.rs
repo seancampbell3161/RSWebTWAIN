@@ -19,7 +19,7 @@ async fn ping_pong() {
     let port = get_free_port().await;
     let config = WsServerConfig {
         port,
-        allowed_origins: Vec::new(),
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: None,
     };
 
@@ -58,7 +58,7 @@ async fn list_scanners_returns_valid_response() {
     let port = get_free_port().await;
     let config = WsServerConfig {
         port,
-        allowed_origins: Vec::new(),
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: None,
     };
 
@@ -102,7 +102,7 @@ async fn invalid_json_returns_error() {
     let port = get_free_port().await;
     let config = WsServerConfig {
         port,
-        allowed_origins: Vec::new(),
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: None,
     };
 
@@ -136,7 +136,7 @@ async fn multiple_clients_can_connect() {
     let port = get_free_port().await;
     let config = WsServerConfig {
         port,
-        allowed_origins: Vec::new(),
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: None,
     };
 
@@ -191,7 +191,7 @@ async fn auth_token_valid_connects() {
     let port = get_free_port().await;
     let config = WsServerConfig {
         port,
-        allowed_origins: Vec::new(),
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: Some("secret".to_string()),
     };
 
@@ -225,7 +225,7 @@ async fn auth_token_invalid_rejected() {
     let port = get_free_port().await;
     let config = WsServerConfig {
         port,
-        allowed_origins: Vec::new(),
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: Some("secret".to_string()),
     };
 
@@ -252,7 +252,7 @@ async fn auth_token_missing_rejected() {
     let port = get_free_port().await;
     let config = WsServerConfig {
         port,
-        allowed_origins: Vec::new(),
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: Some("secret".to_string()),
     };
 
@@ -300,7 +300,10 @@ async fn origin_allowed_connects() {
     let port = get_free_port().await;
     let config = WsServerConfig {
         port,
-        allowed_origins: vec!["https://app.example.com".to_string()],
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
+            allow_localhost: false,
+            extra: vec!["https://app.example.com".to_string()],
+        },
         auth_token: None,
     };
 
@@ -334,7 +337,10 @@ async fn origin_disallowed_rejected() {
     let port = get_free_port().await;
     let config = WsServerConfig {
         port,
-        allowed_origins: vec!["https://app.example.com".to_string()],
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
+            allow_localhost: false,
+            extra: vec!["https://app.example.com".to_string()],
+        },
         auth_token: None,
     };
 
@@ -361,7 +367,10 @@ async fn origin_missing_rejected() {
     let port = get_free_port().await;
     let config = WsServerConfig {
         port,
-        allowed_origins: vec!["https://app.example.com".to_string()],
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
+            allow_localhost: false,
+            extra: vec!["https://app.example.com".to_string()],
+        },
         auth_token: None,
     };
 
@@ -393,7 +402,7 @@ async fn cancel_unknown_scan_returns_error() {
     let port = get_free_port().await;
     let config = WsServerConfig {
         port,
-        allowed_origins: Vec::new(),
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: None,
     };
 
@@ -419,5 +428,167 @@ async fn cancel_unknown_scan_returns_error() {
     assert_eq!(v["id"], "cancel-1");
     assert_eq!(v["code"], "INVALID_REQUEST");
 
+    handler.abort();
+}
+
+// --- OriginPolicy: localhost-only default behavior ---
+
+async fn connect_with_origin(
+    port: u16,
+    origin: Option<&str>,
+) -> Result<(), tungstenite::Error> {
+    let url = format!("ws://127.0.0.1:{port}");
+    let mut req = tungstenite::http::Request::builder()
+        .uri(&url)
+        .header("Host", format!("127.0.0.1:{port}"))
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", tungstenite::handshake::client::generate_key());
+    if let Some(o) = origin {
+        req = req.header("Origin", o);
+    }
+    let req = req.body(()).unwrap();
+    tokio_tungstenite::connect_async(req).await.map(|_| ())
+}
+
+#[tokio::test]
+async fn restricted_allows_http_localhost() {
+    let port = get_free_port().await;
+    let config = WsServerConfig {
+        port,
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
+            allow_localhost: true,
+            extra: vec![],
+        },
+        auth_token: None,
+    };
+    let handle = ws_server::start_server(config).await.unwrap();
+    let event_tx = handle.event_tx.clone();
+    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
+
+    connect_with_origin(port, Some("http://localhost:4200")).await.expect("localhost should connect");
+    handler.abort();
+}
+
+#[tokio::test]
+async fn restricted_allows_127_0_0_1() {
+    let port = get_free_port().await;
+    let config = WsServerConfig {
+        port,
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
+            allow_localhost: true,
+            extra: vec![],
+        },
+        auth_token: None,
+    };
+    let handle = ws_server::start_server(config).await.unwrap();
+    let event_tx = handle.event_tx.clone();
+    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
+
+    connect_with_origin(port, Some("http://127.0.0.1:8080")).await.expect("127.0.0.1 should connect");
+    handler.abort();
+}
+
+#[tokio::test]
+async fn restricted_allows_ipv6_loopback() {
+    let port = get_free_port().await;
+    let config = WsServerConfig {
+        port,
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
+            allow_localhost: true,
+            extra: vec![],
+        },
+        auth_token: None,
+    };
+    let handle = ws_server::start_server(config).await.unwrap();
+    let event_tx = handle.event_tx.clone();
+    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
+
+    connect_with_origin(port, Some("http://[::1]:4200")).await.expect("[::1] should connect");
+    handler.abort();
+}
+
+#[tokio::test]
+async fn restricted_rejects_internet_origin() {
+    let port = get_free_port().await;
+    let config = WsServerConfig {
+        port,
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
+            allow_localhost: true,
+            extra: vec![],
+        },
+        auth_token: None,
+    };
+    let handle = ws_server::start_server(config).await.unwrap();
+    let event_tx = handle.event_tx.clone();
+    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
+
+    let err = connect_with_origin(port, Some("https://evil.example.com")).await
+        .expect_err("evil.example.com must be rejected");
+    let msg = format!("{err}");
+    assert!(msg.contains("403") || msg.contains("Forbidden"), "expected 403, got {msg}");
+    handler.abort();
+}
+
+#[tokio::test]
+async fn restricted_rejects_missing_origin() {
+    let port = get_free_port().await;
+    let config = WsServerConfig {
+        port,
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
+            allow_localhost: true,
+            extra: vec![],
+        },
+        auth_token: None,
+    };
+    let handle = ws_server::start_server(config).await.unwrap();
+    let event_tx = handle.event_tx.clone();
+    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
+
+    let err = connect_with_origin(port, None).await
+        .expect_err("missing Origin must be rejected under Restricted");
+    let msg = format!("{err}");
+    assert!(msg.contains("403") || msg.contains("Forbidden"), "expected 403, got {msg}");
+    handler.abort();
+}
+
+#[tokio::test]
+async fn restricted_extra_origin_exact_match_allowed() {
+    let port = get_free_port().await;
+    let config = WsServerConfig {
+        port,
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
+            allow_localhost: false,
+            extra: vec!["https://app.example.com".to_string()],
+        },
+        auth_token: None,
+    };
+    let handle = ws_server::start_server(config).await.unwrap();
+    let event_tx = handle.event_tx.clone();
+    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
+
+    connect_with_origin(port, Some("https://app.example.com")).await.expect("exact match");
+    let err = connect_with_origin(port, Some("http://localhost:4200")).await
+        .expect_err("localhost rejected when allow_localhost=false");
+    let msg = format!("{err}");
+    assert!(msg.contains("403") || msg.contains("Forbidden"), "expected 403, got {msg}");
+    handler.abort();
+}
+
+#[tokio::test]
+async fn allow_all_accepts_anything() {
+    let port = get_free_port().await;
+    let config = WsServerConfig {
+        port,
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
+        auth_token: None,
+    };
+    let handle = ws_server::start_server(config).await.unwrap();
+    let event_tx = handle.event_tx.clone();
+    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
+
+    connect_with_origin(port, Some("https://anything.example.com")).await.expect("AllowAll");
+    connect_with_origin(port, None).await.expect("AllowAll missing-origin");
     handler.abort();
 }

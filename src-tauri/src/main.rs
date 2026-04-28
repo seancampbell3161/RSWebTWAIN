@@ -300,30 +300,14 @@ fn main() {
                 Err(_) => DEFAULT_WS_PORT,
             };
 
-            // --- Allowed Origins ---
-            let allowed_origins: Vec<String> = if cfg!(debug_assertions) {
-                // In debug mode, allow all origins for easier development
-                Vec::new()
+            // TODO(Task 10): wire origin_policy from AgentConfig loaded by config module.
+            // For now use AllowAll in debug and a localhost-only Restricted in release.
+            let origin_policy = if cfg!(debug_assertions) {
+                ws_server::OriginPolicy::AllowAll
             } else {
-                match std::env::var("RSWEBTWAIN_ALLOWED_ORIGINS") {
-                    Ok(val) => {
-                        let origins: Vec<String> = val
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                        info!("Allowed origins from RSWEBTWAIN_ALLOWED_ORIGINS: {:?}", origins);
-                        origins
-                    }
-                    Err(_) => {
-                        // Production defaults — update these to match your deployment
-                        let defaults = vec![
-                            "https://your-app.example.com".to_string(),
-                            "https://localhost:4200".to_string(),
-                        ];
-                        info!("Using default allowed origins: {:?}", defaults);
-                        defaults
-                    }
+                ws_server::OriginPolicy::Restricted {
+                    allow_localhost: true,
+                    extra: Vec::new(),
                 }
             };
 
@@ -331,7 +315,7 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 let config = WsServerConfig {
                     port,
-                    allowed_origins,
+                    origin_policy,
                     auth_token,
                 };
 
