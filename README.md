@@ -123,6 +123,13 @@ Issues and PRs welcome. Before opening a PR:
 - New behaviour should come with a test (the integration tests use a fake
   sidecar so you don't need real hardware)
 
+## Policies
+
+- [Code Signing Policy](docs/code-signing-policy.md) — what is signed, who
+  signs it, and how to report concerns.
+- [Privacy Policy](docs/privacy.md) — what the agent does and does not do
+  with data.
+
 ## License
 
 Licensed under either of
