@@ -576,6 +576,129 @@ async fn restricted_extra_origin_exact_match_allowed() {
     handler.abort();
 }
 
+// ============================================================
+// Concurrent scan rejection (uses fake sidecar as mock scanner)
+// ============================================================
+
+const FAKE_SIDECAR: &str = env!("CARGO_BIN_EXE_fake_sidecar");
+
+/// Drive a scan against the fake sidecar and confirm a second concurrent
+/// `start_scan` is rejected with `SCANNER_BUSY` while the first is in-flight.
+#[tokio::test]
+async fn concurrent_start_scan_returns_busy() {
+    let port = get_free_port().await;
+    let config = WsServerConfig {
+        port,
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
+        auth_token: None,
+    };
+
+    let handle = ws_server::start_server(config).await.unwrap();
+    let event_tx = handle.event_tx.clone();
+    let handler = tokio::spawn(scan_agent_lib::command_handler(
+        handle.command_rx,
+        event_tx,
+        Some(FAKE_SIDECAR.to_string()),
+    ));
+
+    let url = format!("ws://127.0.0.1:{}", port);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut tx, mut rx) = ws_stream.split();
+
+    // 1) Discover scanners — fake sidecar reports "Fake Scanner".
+    tx.send(Message::Text(
+        r#"{"type":"list_scanners","id":"ls-1"}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(15), rx.next())
+        .await
+        .expect("Timeout waiting for scanner_list")
+        .expect("Stream ended")
+        .expect("WS error");
+    let v: serde_json::Value = serde_json::from_str(&response.into_text().unwrap()).unwrap();
+    assert_eq!(
+        v["type"], "scanner_list",
+        "expected scanner_list, got: {v}"
+    );
+    let scanners = v["scanners"].as_array().expect("scanners is an array");
+    assert!(
+        scanners.iter().any(|s| s["name"] == "Fake Scanner"),
+        "Fake Scanner not present in {scanners:?}"
+    );
+
+    // 2) Kick off a slow scan against the fake.
+    tx.send(Message::Text(
+        r#"{"type":"start_scan","id":"scan-1","options":{"scanner_id":"Fake Scanner","format":"png"}}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    // Yield long enough for task A to set the scanning flag and begin the
+    // sidecar handshake before we send the second start_scan. The fake's
+    // configured scan delay (1s) gives a comfortable window.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    // 3) Concurrent start_scan — must be rejected immediately.
+    tx.send(Message::Text(
+        r#"{"type":"start_scan","id":"scan-2","options":{"scanner_id":"Fake Scanner","format":"png"}}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    // 4) Read responses until we observe both:
+    //    - SCANNER_BUSY error correlated to scan-2
+    //    - scan_complete correlated to scan-1 (proves the first scan was
+    //      driven through the orchestrator + sidecar end-to-end and finished
+    //      cleanly, releasing the busy flag).
+    let mut saw_busy = false;
+    let mut saw_complete = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline && !(saw_busy && saw_complete) {
+        let remaining = deadline - std::time::Instant::now();
+        let next = tokio::time::timeout(remaining, rx.next()).await;
+        let msg = match next {
+            Ok(Some(Ok(m))) => m,
+            _ => break,
+        };
+        let text = match msg.into_text() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let msg_type = v["type"].as_str().unwrap_or("");
+        let msg_id = v["id"].as_str().unwrap_or("");
+        match (msg_type, msg_id) {
+            ("error", "scan-2") => {
+                assert_eq!(
+                    v["code"], "SCANNER_BUSY",
+                    "expected SCANNER_BUSY for scan-2, got: {v}"
+                );
+                saw_busy = true;
+            }
+            ("scan_complete", "scan-1") => {
+                saw_complete = true;
+            }
+            ("error", "scan-1") => {
+                panic!("scan-1 unexpectedly errored: {v}");
+            }
+            _ => { /* ignore progress / other frames */ }
+        }
+    }
+
+    assert!(saw_busy, "did not observe SCANNER_BUSY rejection for scan-2");
+    assert!(
+        saw_complete,
+        "first scan did not complete cleanly within deadline"
+    );
+
+    handler.abort();
+}
+
 #[tokio::test]
 async fn allow_all_accepts_anything() {
     let port = get_free_port().await;
