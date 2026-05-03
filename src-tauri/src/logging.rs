@@ -146,6 +146,7 @@ fn is_iso_date(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs::File;
     use tempfile::tempdir;
 
@@ -225,6 +226,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn init_logging_creates_log_file_and_writes() {
         use std::thread::sleep;
         use std::time::Duration;
@@ -253,6 +255,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn init_logging_second_call_returns_none() {
         // Whichever of these runs second hits the OnceLock guard and returns None.
         // The order between this test and the file-creation test above doesn't

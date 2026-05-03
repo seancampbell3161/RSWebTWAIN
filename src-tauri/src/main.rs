@@ -103,13 +103,13 @@ fn dpapi_decrypt(ciphertext: &[u8]) -> std::io::Result<Vec<u8>> {
 }
 
 fn main() {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "scan_agent=info".into()),
-        )
-        .init();
+    // Resolve log dir under %APPDATA%. The Tauri app handle (which would give us
+    // app_data_dir()) isn't available before the builder runs, so read APPDATA
+    // directly. On non-Windows hosts (dev) APPDATA is unset and file logging is
+    // skipped — stderr remains.
+    let log_dir = std::env::var_os("APPDATA")
+        .map(|p| std::path::PathBuf::from(p).join("com.rswebtwain.app").join("logs"));
+    let _log_guard = scan_agent_lib::logging::init_logging(log_dir.as_deref());
 
     info!("RSWebTWAIN starting");
 
