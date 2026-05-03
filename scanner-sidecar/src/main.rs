@@ -16,6 +16,7 @@ use std::io::{self, BufRead, Write};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
+mod logging;
 mod twain_ffi;
 
 #[cfg(windows)]
