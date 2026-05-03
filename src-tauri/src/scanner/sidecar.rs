@@ -36,9 +36,7 @@ const SPAWN_RETRY_BACKOFFS: [Duration; 2] = [
 /// Used by `try_spawn_once` to classify a startup EOF as case (b) Retryable.
 const SIDECAR_EOF_MSG: &str = "Sidecar closed stdout (process exited)";
 
-// ---------------------------------------------------------------------------
 // Sidecar IPC types (mirrors scanner-sidecar/src/main.rs protocol)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -91,9 +89,7 @@ pub(crate) struct SidecarScannerEntry {
     pub manufacturer: String,
 }
 
-// ---------------------------------------------------------------------------
 // Spawn retry policy
-// ---------------------------------------------------------------------------
 
 /// Classification for spawn-time failures used by `with_spawn_retry`.
 ///
@@ -139,9 +135,7 @@ where
     unreachable!("loop body always returns")
 }
 
-// ---------------------------------------------------------------------------
 // Sidecar Manager
-// ---------------------------------------------------------------------------
 
 pub struct SidecarManager {
     child: Option<Child>,

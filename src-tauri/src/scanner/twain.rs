@@ -19,9 +19,7 @@ use tracing::{debug, error, info, warn};
 
 use super::twain_ffi::*;
 
-// ---------------------------------------------------------------------------
 // Error types
-// ---------------------------------------------------------------------------
 
 #[derive(Error, Debug)]
 pub enum TwainError {
@@ -67,9 +65,7 @@ pub enum TwainError {
 
 pub type TwainResult<T> = Result<T, TwainError>;
 
-// ---------------------------------------------------------------------------
 // Scanner source information (serializable for the protocol layer)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SourceInfo {
@@ -95,9 +91,7 @@ impl From<&TW_IDENTITY> for SourceInfo {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Scan options (what the Angular client sends)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ScanOptions {
@@ -151,9 +145,7 @@ impl ColorMode {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Scanned page data
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct ScannedPage {
@@ -166,9 +158,7 @@ pub struct ScannedPage {
     pub data: Vec<u8>,
 }
 
-// ---------------------------------------------------------------------------
 // Internal: Shared DSM state carried through transitions
-// ---------------------------------------------------------------------------
 
 struct DsmHandle {
     #[cfg(windows)]
@@ -241,9 +231,7 @@ impl DsmHandle {
     }
 }
 
-// ---------------------------------------------------------------------------
 // State 1: PreSession — nothing loaded
-// ---------------------------------------------------------------------------
 
 pub struct PreSession;
 
@@ -304,9 +292,7 @@ impl PreSession {
     }
 }
 
-// ---------------------------------------------------------------------------
 // State 2: DsmLoaded — DSM DLL loaded
-// ---------------------------------------------------------------------------
 
 pub struct DsmLoaded {
     handle: Option<DsmHandle>,
@@ -349,9 +335,7 @@ impl DsmLoaded {
     }
 }
 
-// ---------------------------------------------------------------------------
 // State 3: DsmOpened — DSM is open, can enumerate/open sources
-// ---------------------------------------------------------------------------
 
 pub struct DsmOpened {
     handle: Option<DsmHandle>,
@@ -523,9 +507,7 @@ impl DsmOpened {
     }
 }
 
-// ---------------------------------------------------------------------------
 // State 4: SourceOpened — source is open, can negotiate capabilities
-// ---------------------------------------------------------------------------
 
 pub struct SourceOpened {
     handle: Option<DsmHandle>,
@@ -762,9 +744,7 @@ impl SourceOpened {
     }
 }
 
-// ---------------------------------------------------------------------------
 // State 5: SourceEnabled — waiting for MSG_XFERREADY
-// ---------------------------------------------------------------------------
 
 pub struct SourceEnabled {
     handle: Option<DsmHandle>,
@@ -940,9 +920,7 @@ pub enum WaitResult {
     CloseRequested(SourceOpened),
 }
 
-// ---------------------------------------------------------------------------
 // State 6: TransferReady — scanner has data ready to transfer
-// ---------------------------------------------------------------------------
 
 pub struct TransferReady {
     handle: Option<DsmHandle>,
@@ -1174,9 +1152,7 @@ pub enum TransferResult {
     },
 }
 
-// ---------------------------------------------------------------------------
 // Hidden message-only window for TWAIN message pump
-// ---------------------------------------------------------------------------
 
 #[cfg(windows)]
 pub fn create_hidden_hwnd() -> TwainResult<isize> {

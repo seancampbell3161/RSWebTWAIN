@@ -182,9 +182,7 @@ async fn multiple_clients_can_connect() {
     handler.abort();
 }
 
-// ============================================================
 // Auth token tests
-// ============================================================
 
 #[tokio::test]
 async fn auth_token_valid_connects() {
@@ -274,9 +272,7 @@ async fn auth_token_missing_rejected() {
     }
 }
 
-// ============================================================
 // Origin validation tests
-// ============================================================
 
 /// Build a WebSocket client request with an explicit Origin header.
 fn ws_request_with_origin(port: u16, origin: &str) -> tungstenite::http::Request<()> {
@@ -393,9 +389,7 @@ async fn origin_missing_rejected() {
     }
 }
 
-// ============================================================
 // Cancel scan error path
-// ============================================================
 
 #[tokio::test]
 async fn cancel_unknown_scan_returns_error() {
@@ -576,9 +570,7 @@ async fn restricted_extra_origin_exact_match_allowed() {
     handler.abort();
 }
 
-// ============================================================
 // Concurrent scan rejection (uses fake sidecar as mock scanner)
-// ============================================================
 
 const FAKE_SIDECAR: &str = env!("CARGO_BIN_EXE_fake_sidecar");
 
