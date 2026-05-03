@@ -76,3 +76,24 @@ a one-line note that the template was written.
 
 Delete `%APPDATA%\com.rswebtwain.agent\config.toml` and relaunch the agent.
 The next startup writes a fresh commented template.
+
+## Log files
+
+The agent and its 32-bit sidecar write rotated log files to:
+
+```
+%APPDATA%\com.rswebtwain.app\logs\
+  agent.log.YYYY-MM-DD     # main agent
+  sidecar.log.YYYY-MM-DD   # 32-bit TWAIN sidecar
+```
+
+Files rotate daily. The 7 most recent dated files per binary are kept; older
+files are deleted on agent startup. The current day's file is always kept.
+
+To raise log verbosity, set `RUST_LOG` in the environment before launching the
+agent — for example `RUST_LOG=scan_agent=debug,scanner_sidecar=debug`. The
+sidecar inherits this from the parent process.
+
+To override the log directory entirely, set `RSWEBTWAIN_LOG_DIR` to an absolute
+path before launching. If the directory cannot be created or written, the agent
+falls back to stderr-only logging without failing startup.
