@@ -109,14 +109,16 @@ fn main() {
     // skipped — stderr remains.
     let log_dir = std::env::var_os("APPDATA")
         .map(|p| std::path::PathBuf::from(p).join("com.rswebtwain.app").join("logs"));
-    let _log_guard = scan_agent_lib::logging::init_logging(log_dir.as_deref());
 
     if let Some(dir) = &log_dir {
-        // SAFETY: called once at process startup before any other thread runs.
+        // SAFETY: called at process startup before any thread is spawned. The
+        // appender's worker thread is created later inside init_logging.
         unsafe {
             std::env::set_var("RSWEBTWAIN_LOG_DIR", dir);
         }
     }
+
+    let _log_guard = scan_agent_lib::logging::init_logging(log_dir.as_deref());
 
     info!("RSWebTWAIN starting");
 
