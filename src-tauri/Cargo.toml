@@ -50,7 +50,6 @@ libloading = "0.8"
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
 tempfile = "3"
-serial_test = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

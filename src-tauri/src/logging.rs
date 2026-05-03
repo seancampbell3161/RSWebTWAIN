@@ -146,7 +146,6 @@ fn is_iso_date(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
     use std::fs::File;
     use tempfile::tempdir;
 
@@ -226,8 +225,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
-    fn init_logging_creates_log_file_and_writes() {
+    fn init_logging_creates_file_and_is_idempotent() {
         use std::thread::sleep;
         use std::time::Duration;
         use tracing::info;
@@ -235,10 +233,21 @@ mod tests {
         let dir = tempdir().unwrap();
         let log_dir = dir.path().join("logs");
 
+        // First call: must install subscriber and return a guard.
         let guard = init_logging(Some(&log_dir));
-        assert!(guard.is_some(), "guard must be returned when log dir is set");
+        assert!(guard.is_some(), "first call must return a guard when log dir is set");
 
         info!("hello from test");
+
+        // Second call: idempotent no-op, returns None regardless of argument.
+        assert!(
+            init_logging(None).is_none(),
+            "second call must be a no-op (returns None)"
+        );
+        assert!(
+            init_logging(Some(&log_dir)).is_none(),
+            "third call must also be a no-op"
+        );
 
         // Force the non-blocking writer to flush by dropping the guard.
         drop(guard);
@@ -252,16 +261,5 @@ mod tests {
             }),
             "expected an agent.log* file in {log_dir:?}, found {entries:?}"
         );
-    }
-
-    #[test]
-    #[serial]
-    fn init_logging_second_call_returns_none() {
-        // Whichever of these runs second hits the OnceLock guard and returns None.
-        // The order between this test and the file-creation test above doesn't
-        // matter — both are valid behaviors of init_logging.
-        let _first = init_logging(None);
-        let second = init_logging(None);
-        assert!(second.is_none(), "second init must be a no-op");
     }
 }
