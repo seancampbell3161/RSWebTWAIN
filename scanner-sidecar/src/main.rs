@@ -78,11 +78,10 @@ struct ScannerEntry {
 // Main loop
 
 fn main() {
-    // Log to stderr so stdout is reserved for the IPC protocol
-    tracing_subscriber::fmt()
-        .with_writer(io::stderr)
-        .with_env_filter("scanner_sidecar=debug")
-        .init();
+    let log_dir = std::env::var("RSWEBTWAIN_LOG_DIR")
+        .ok()
+        .map(std::path::PathBuf::from);
+    let _log_guard = logging::init_logging(log_dir.as_deref());
 
     info!("32-bit TWAIN scanner sidecar starting");
 

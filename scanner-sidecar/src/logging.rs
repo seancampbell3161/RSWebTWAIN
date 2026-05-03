@@ -3,9 +3,6 @@
 //! Duplicated from `src-tauri/src/logging.rs` rather than shared because the
 //! sidecar deliberately stays free of the `scan_agent_lib` cross-crate dep —
 //! the sidecar must build clean as a 32-bit crate with minimal deps.
-//!
-//! TODO(Task 6): remove the allow below once main() calls init_logging.
-#![allow(dead_code)]
 
 use std::fs;
 use std::io;
