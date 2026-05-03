@@ -7,6 +7,7 @@
 //! - PDF generation (`pdf`)
 
 pub mod config;
+pub mod logging;
 pub mod pdf;
 pub mod protocol;
 pub mod scanner;
