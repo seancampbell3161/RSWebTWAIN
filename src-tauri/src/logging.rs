@@ -3,6 +3,70 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
+use tracing_appender::rolling::{self, RollingFileAppender};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, EnvFilter};
+
+const LOG_PREFIX: &str = "agent.log";
+const KEEP_DAYS: usize = 7;
+
+static INIT_DONE: OnceLock<()> = OnceLock::new();
+
+/// Install the global tracing subscriber with a stderr layer and, when
+/// `log_dir` is `Some` and writable, a non-blocking daily-rotating file layer.
+///
+/// Returns the `WorkerGuard` for the file layer; the caller MUST keep it alive
+/// for the program's duration. Dropping it flushes and closes the worker.
+///
+/// Calling this more than once in a process is a no-op (returns `None`).
+pub fn init_logging(log_dir: Option<&Path>) -> Option<WorkerGuard> {
+    if INIT_DONE.set(()).is_err() {
+        return None;
+    }
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("scan_agent=info"));
+
+    let stderr_layer = fmt::layer().with_writer(std::io::stderr);
+
+    let (file_layer, guard) = match log_dir.and_then(try_make_file_appender) {
+        Some((appender, guard)) => {
+            let layer = fmt::layer().with_writer(appender).with_ansi(false);
+            (Some(layer), Some(guard))
+        }
+        None => (None, None),
+    };
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stderr_layer)
+        .with(file_layer)
+        .init();
+
+    if let Some(dir) = log_dir {
+        if let Err(e) = prune_old_logs(dir, LOG_PREFIX, KEEP_DAYS) {
+            eprintln!("warn: pruning old logs in {} failed: {e}", dir.display());
+        }
+    }
+
+    guard
+}
+
+fn try_make_file_appender(dir: &Path) -> Option<(NonBlocking, WorkerGuard)> {
+    if let Err(e) = fs::create_dir_all(dir) {
+        eprintln!(
+            "warn: cannot create log dir {}: {e} — file logging disabled",
+            dir.display()
+        );
+        return None;
+    }
+    let appender: RollingFileAppender = rolling::daily(dir, LOG_PREFIX);
+    Some(tracing_appender::non_blocking(appender))
+}
 
 /// Delete dated log files in `dir` matching `{prefix}.YYYY-MM-DD`,
 /// keeping only the `keep` most recent (sorted lexicographically by filename,
@@ -158,5 +222,43 @@ mod tests {
         let dir = tempdir().unwrap();
         prune_old_logs(dir.path(), "agent.log", 3).unwrap();
         assert_eq!(names(dir.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn init_logging_creates_log_file_and_writes() {
+        use std::thread::sleep;
+        use std::time::Duration;
+        use tracing::info;
+
+        let dir = tempdir().unwrap();
+        let log_dir = dir.path().join("logs");
+
+        let guard = init_logging(Some(&log_dir));
+        assert!(guard.is_some(), "guard must be returned when log dir is set");
+
+        info!("hello from test");
+
+        // Force the non-blocking writer to flush by dropping the guard.
+        drop(guard);
+        sleep(Duration::from_millis(50));
+
+        let entries: Vec<_> = fs::read_dir(&log_dir).unwrap().collect();
+        assert!(
+            entries.iter().any(|e| {
+                let name = e.as_ref().unwrap().file_name();
+                name.to_string_lossy().starts_with("agent.log")
+            }),
+            "expected an agent.log* file in {log_dir:?}, found {entries:?}"
+        );
+    }
+
+    #[test]
+    fn init_logging_second_call_returns_none() {
+        // Whichever of these runs second hits the OnceLock guard and returns None.
+        // The order between this test and the file-creation test above doesn't
+        // matter — both are valid behaviors of init_logging.
+        let _first = init_logging(None);
+        let second = init_logging(None);
+        assert!(second.is_none(), "second init must be a no-op");
     }
 }
