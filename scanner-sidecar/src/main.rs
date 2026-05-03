@@ -21,9 +21,7 @@ mod twain_ffi;
 #[cfg(windows)]
 use twain_ffi::*;
 
-// ---------------------------------------------------------------------------
 // IPC Protocol Messages
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -76,9 +74,7 @@ struct ScannerEntry {
     manufacturer: String,
 }
 
-// ---------------------------------------------------------------------------
 // Main loop
-// ---------------------------------------------------------------------------
 
 fn main() {
     // Log to stderr so stdout is reserved for the IPC protocol
@@ -156,9 +152,7 @@ fn send_response(response: &SidecarResponse) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Command handlers (32-bit TWAIN operations)
-// ---------------------------------------------------------------------------
 
 #[cfg(windows)]
 fn handle_list_scanners() {
@@ -744,9 +738,7 @@ fn handle_scan(
     });
 }
 
-// ---------------------------------------------------------------------------
 // TWAIN capability helpers
-// ---------------------------------------------------------------------------
 
 #[cfg(windows)]
 fn set_capability_u16(
@@ -875,9 +867,7 @@ fn set_capability_i16(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Cleanup helpers
-// ---------------------------------------------------------------------------
 
 /// Disable source, close source, close DSM
 #[cfg(windows)]
@@ -974,9 +964,7 @@ fn stdin_has_data() -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Hidden message window for TWAIN
-// ---------------------------------------------------------------------------
 
 #[cfg(windows)]
 fn create_message_window() -> Result<isize, String> {

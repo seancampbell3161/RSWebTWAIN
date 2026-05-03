@@ -8,9 +8,7 @@
 use std::ffi::c_void;
 use std::os::raw::c_char;
 
-// ---------------------------------------------------------------------------
 // Primitive type aliases (matching twain.h typedefs)
-// ---------------------------------------------------------------------------
 
 pub type TW_UINT16 = u16;
 pub type TW_UINT32 = u32;
@@ -24,9 +22,7 @@ pub type TW_MEMREF = *mut c_void;
 pub type TW_STR32 = [c_char; 34];
 pub type TW_STR255 = [c_char; 256];
 
-// ---------------------------------------------------------------------------
 // Core structures
-// ---------------------------------------------------------------------------
 
 /// Fixed-point number: whole + frac/65536
 #[repr(C)]
@@ -249,9 +245,7 @@ pub struct TW_STATUS {
     pub Data: TW_UINT16,
 }
 
-// ---------------------------------------------------------------------------
 // Capability container structures
-// ---------------------------------------------------------------------------
 
 /// Single value container
 #[repr(C)]
@@ -284,17 +278,13 @@ pub struct TW_ENUMERATION {
     pub ItemList: [TW_UINT8; 1], // Variable-length array
 }
 
-// ---------------------------------------------------------------------------
 // Constants: Data Groups
-// ---------------------------------------------------------------------------
 
 pub const DG_CONTROL: TW_UINT32 = 0x0001;
 pub const DG_IMAGE: TW_UINT32 = 0x0002;
 pub const DG_AUDIO: TW_UINT32 = 0x0004;
 
-// ---------------------------------------------------------------------------
 // Constants: Data Argument Types (DAT_*)
-// ---------------------------------------------------------------------------
 
 pub const DAT_CAPABILITY: TW_UINT16 = 0x0001;
 pub const DAT_EVENT: TW_UINT16 = 0x0002;
@@ -310,9 +300,7 @@ pub const DAT_IMAGELAYOUT: TW_UINT16 = 0x0102;
 pub const DAT_IMAGEMEMXFER: TW_UINT16 = 0x0103;
 pub const DAT_IMAGENATIVEXFER: TW_UINT16 = 0x0104;
 
-// ---------------------------------------------------------------------------
 // Constants: Messages (MSG_*)
-// ---------------------------------------------------------------------------
 
 // Generic messages
 pub const MSG_GET: TW_UINT16 = 0x0001;
@@ -346,9 +334,7 @@ pub const MSG_XFERREADY: TW_UINT16 = 0x0101;
 pub const MSG_CLOSEDSREQ: TW_UINT16 = 0x0102;
 pub const MSG_CLOSEDSOK: TW_UINT16 = 0x0103;
 
-// ---------------------------------------------------------------------------
 // Constants: Return Codes (TWRC_*)
-// ---------------------------------------------------------------------------
 
 pub const TWRC_SUCCESS: TW_UINT16 = 0;
 pub const TWRC_FAILURE: TW_UINT16 = 1;
@@ -359,9 +345,7 @@ pub const TWRC_NOTDSEVENT: TW_UINT16 = 5;
 pub const TWRC_XFERDONE: TW_UINT16 = 6;
 pub const TWRC_ENDOFLIST: TW_UINT16 = 7;
 
-// ---------------------------------------------------------------------------
 // Constants: Condition Codes (TWCC_*)
-// ---------------------------------------------------------------------------
 
 pub const TWCC_SUCCESS: TW_UINT16 = 0;
 pub const TWCC_BUMMER: TW_UINT16 = 1;
@@ -377,9 +361,7 @@ pub const TWCC_CAPBADOPERATION: TW_UINT16 = 14;
 pub const TWCC_PAPERJAM: TW_UINT16 = 16;
 pub const TWCC_PAPERDOUBLEFEED: TW_UINT16 = 17;
 
-// ---------------------------------------------------------------------------
 // Constants: Capabilities (CAP_* / ICAP_*)
-// ---------------------------------------------------------------------------
 
 pub const CAP_XFERCOUNT: TW_UINT16 = 0x0001;
 pub const CAP_FEEDERENABLED: TW_UINT16 = 0x1002;
@@ -396,9 +378,7 @@ pub const ICAP_BITDEPTH: TW_UINT16 = 0x112B;
 pub const ICAP_XRESOLUTION: TW_UINT16 = 0x1118;
 pub const ICAP_YRESOLUTION: TW_UINT16 = 0x1119;
 
-// ---------------------------------------------------------------------------
 // Constants: Pixel Types (TWPT_*)
-// ---------------------------------------------------------------------------
 
 pub const TWPT_BW: TW_UINT16 = 0;
 pub const TWPT_GRAY: TW_UINT16 = 1;
@@ -407,27 +387,21 @@ pub const TWPT_PALETTE: TW_UINT16 = 3;
 pub const TWPT_CMY: TW_UINT16 = 4;
 pub const TWPT_CMYK: TW_UINT16 = 5;
 
-// ---------------------------------------------------------------------------
 // Constants: Container Types (TWON_*)
-// ---------------------------------------------------------------------------
 
 pub const TWON_ARRAY: TW_UINT16 = 3;
 pub const TWON_ENUMERATION: TW_UINT16 = 4;
 pub const TWON_ONEVALUE: TW_UINT16 = 5;
 pub const TWON_RANGE: TW_UINT16 = 6;
 
-// ---------------------------------------------------------------------------
 // Constants: Transfer Mechanisms (TWSX_*)
-// ---------------------------------------------------------------------------
 
 pub const TWSX_NATIVE: TW_UINT16 = 0;
 pub const TWSX_FILE: TW_UINT16 = 1;
 pub const TWSX_MEMORY: TW_UINT16 = 2;
 pub const TWSX_MEMFILE: TW_UINT16 = 4;
 
-// ---------------------------------------------------------------------------
 // Constants: Compression Types (TWCP_*)
-// ---------------------------------------------------------------------------
 
 pub const TWCP_NONE: TW_UINT16 = 0;
 pub const TWCP_GROUP31D: TW_UINT16 = 2;
@@ -435,17 +409,13 @@ pub const TWCP_GROUP32D: TW_UINT16 = 3;
 pub const TWCP_GROUP4: TW_UINT16 = 5;
 pub const TWCP_JPEG: TW_UINT16 = 6;
 
-// ---------------------------------------------------------------------------
 // Constants: Units (TWUN_*)
-// ---------------------------------------------------------------------------
 
 pub const TWUN_INCHES: TW_UINT16 = 0;
 pub const TWUN_CENTIMETERS: TW_UINT16 = 1;
 pub const TWUN_PIXELS: TW_UINT16 = 5;
 
-// ---------------------------------------------------------------------------
 // Constants: Memory Flags (TWMF_*)
-// ---------------------------------------------------------------------------
 
 pub const TWMF_APPOWNS: TW_UINT32 = 0x0001;
 pub const TWMF_DSMOWNS: TW_UINT32 = 0x0002;
@@ -453,23 +423,17 @@ pub const TWMF_DSOWNS: TW_UINT32 = 0x0004;
 pub const TWMF_POINTER: TW_UINT32 = 0x0008;
 pub const TWMF_HANDLE: TW_UINT32 = 0x0010;
 
-// ---------------------------------------------------------------------------
 // Constants: TWAIN Protocol Version
-// ---------------------------------------------------------------------------
 
 pub const TWON_PROTOCOLMAJOR: TW_UINT16 = 2;
 pub const TWON_PROTOCOLMINOR: TW_UINT16 = 3;
 
-// ---------------------------------------------------------------------------
 // Constants: Language (TWLG_*) and Country (TWCY_*) — subset
-// ---------------------------------------------------------------------------
 
 pub const TWLG_ENGLISH_USA: TW_UINT16 = 13;
 pub const TWCY_USA: TW_UINT16 = 1;
 
-// ---------------------------------------------------------------------------
 // DSM Entry function pointer type
-// ---------------------------------------------------------------------------
 
 /// The single entry point into the TWAIN Data Source Manager.
 /// All TWAIN operations go through this function with different DG/DAT/MSG combinations.
@@ -482,9 +446,7 @@ pub type DSM_Entry = unsafe extern "system" fn(
     pData: TW_MEMREF,
 ) -> TW_UINT16;
 
-// ---------------------------------------------------------------------------
 // Helper: Convert a Rust string to TW_STR32 / TW_STR255
-// ---------------------------------------------------------------------------
 
 pub fn str_to_tw_str32(s: &str) -> TW_STR32 {
     let mut buf: TW_STR32 = [0; 34];

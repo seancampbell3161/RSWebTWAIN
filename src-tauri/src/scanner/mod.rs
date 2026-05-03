@@ -17,9 +17,7 @@ use tracing::{error, info, warn};
 
 use crate::protocol::{AgentMessage, OutputFormat, ScanRequestOptions, ScanStatus};
 
-// ---------------------------------------------------------------------------
 // Scanner trait
-// ---------------------------------------------------------------------------
 
 /// Information about a discovered scanner
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,9 +128,7 @@ pub enum ScanError {
     PdfGeneration(String),
 }
 
-// ---------------------------------------------------------------------------
 // Scan Orchestrator
-// ---------------------------------------------------------------------------
 
 /// Orchestrates scanning operations, trying native 64-bit TWAIN first
 /// and falling back to the 32-bit sidecar.
@@ -256,9 +252,7 @@ impl ScanOrchestrator {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Scan Execution (standalone, does not hold orchestrator lock)
-// ---------------------------------------------------------------------------
 
 /// Execute a native TWAIN scan and stream results back via the provided sender.
 ///

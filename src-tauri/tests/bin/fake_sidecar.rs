@@ -1,13 +1,21 @@
 //! Test-only fake sidecar for the spawn-retry integration tests.
 //!
 //! Reads `FAKE_SIDECAR_BEHAVIOR` and behaves accordingly:
-//!   - `ready`            : print Ready, then read stdin until shutdown command or EOF.
+//!   - `ready`            : print Ready, then read stdin and reply to
+//!     `list_scanners`/`scan`/`shutdown` (other commands are ignored).
+//!     The `scan` handler emits a `scan_progress`, sleeps, then a
+//!     `scan_complete` with zero pages — long enough that a concurrent
+//!     `start_scan` request to the parent must be rejected as busy.
 //!   - `exit_immediately` : exit code 1 with no output (case b — retryable).
 //!   - `hang`             : sleep forever, never print (case c — permanent).
 //!   - `error`            : print an Error response (case d — permanent).
 //!   - `flaky_<n>`        : exit immediately on the first <n> invocations
 //!     (counter persisted via FAKE_SIDECAR_COUNTER_FILE),
 //!     then behave as `ready`.
+//!
+//! Tunables for the `ready` behaviour (env vars):
+//!   - `FAKE_SIDECAR_SCAN_DELAY_MS` : milliseconds to hold the scan open
+//!     between `scan_progress` and `scan_complete` (default 1000).
 
 use std::env;
 use std::fs;
@@ -65,6 +73,11 @@ fn print_ready_and_wait() {
     println!(r#"{{"type":"ready"}}"#);
     io::stdout().flush().ok();
 
+    let scan_delay_ms: u64 = env::var("FAKE_SIDECAR_SCAN_DELAY_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1000);
+
     let stdin = io::stdin();
     let mut lock = stdin.lock();
     let mut buf = String::new();
@@ -77,8 +90,19 @@ fn print_ready_and_wait() {
                     println!(r#"{{"type":"shutdown"}}"#);
                     io::stdout().flush().ok();
                     break;
+                } else if buf.contains("\"command\":\"list_scanners\"") {
+                    println!(
+                        r#"{{"type":"scanner_list","scanners":[{{"id":"fake-1","name":"Fake Scanner","manufacturer":"FakeCo"}}]}}"#
+                    );
+                    io::stdout().flush().ok();
+                } else if buf.contains("\"command\":\"scan\"") {
+                    println!(r#"{{"type":"scan_progress","page":1,"status":"scanning"}}"#);
+                    io::stdout().flush().ok();
+                    thread::sleep(Duration::from_millis(scan_delay_ms));
+                    println!(r#"{{"type":"scan_complete","total_pages":0}}"#);
+                    io::stdout().flush().ok();
                 }
-                // Ignore other commands; this fake only handles startup + shutdown.
+                // Other commands (cancel, etc.) are silently ignored.
             }
             Err(_) => break,
         }
