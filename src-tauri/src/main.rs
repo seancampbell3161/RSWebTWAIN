@@ -111,6 +111,13 @@ fn main() {
         .map(|p| std::path::PathBuf::from(p).join("com.rswebtwain.app").join("logs"));
     let _log_guard = scan_agent_lib::logging::init_logging(log_dir.as_deref());
 
+    if let Some(dir) = &log_dir {
+        // SAFETY: called once at process startup before any other thread runs.
+        unsafe {
+            std::env::set_var("RSWEBTWAIN_LOG_DIR", dir);
+        }
+    }
+
     info!("RSWebTWAIN starting");
 
     tauri::Builder::default()
