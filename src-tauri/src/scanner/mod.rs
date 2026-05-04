@@ -240,7 +240,7 @@ impl ScanOrchestrator {
             None => return Ok(Vec::new()), // No sidecar available
         };
 
-        let mut manager = sidecar::SidecarManager::new(sidecar_path);
+        let mut manager = sidecar::SidecarManager::new_inheriting_env(sidecar_path);
         let scanners = manager.list_scanners()?;
         manager.shutdown();
         Ok(scanners)
@@ -510,7 +510,7 @@ pub async fn execute_sidecar_scan(
 
     // Run sidecar I/O in a blocking task (SidecarManager uses blocking I/O)
     let sidecar_task = tokio::task::spawn_blocking(move || -> Result<(), ScanError> {
-        let mut manager = sidecar::SidecarManager::new(sidecar_path);
+        let mut manager = sidecar::SidecarManager::new_inheriting_env(sidecar_path);
         manager.ensure_running()?;
         manager.start_scan(
             &scanner_name,

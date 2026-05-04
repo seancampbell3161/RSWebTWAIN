@@ -156,6 +156,21 @@ impl SidecarManager {
         }
     }
 
+    /// Construct a `SidecarManager` and forward `RSWEBTWAIN_LOG_DIR` and
+    /// `RUST_LOG` from the parent process environment if set. This is the
+    /// constructor production code should use; tests that need a deterministic
+    /// env should call `SidecarManager::new` and chain `with_env` themselves.
+    pub fn new_inheriting_env(sidecar_path: String) -> Self {
+        let mut mgr = Self::new(sidecar_path);
+        if let Ok(v) = std::env::var("RSWEBTWAIN_LOG_DIR") {
+            mgr = mgr.with_env("RSWEBTWAIN_LOG_DIR", v);
+        }
+        if let Ok(v) = std::env::var("RUST_LOG") {
+            mgr = mgr.with_env("RUST_LOG", v);
+        }
+        mgr
+    }
+
     /// Add an environment variable that will be set on the sidecar child process.
     /// Useful for forwarding RUST_LOG or for driving test fakes.
     pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {

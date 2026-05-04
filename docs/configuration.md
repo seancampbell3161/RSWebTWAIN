@@ -59,9 +59,10 @@ The agent will reject every connection that doesn't match `extra_origins`.
 
 ### Where are the logs?
 
-The agent writes to stdout via `tracing`. Set `RUST_LOG=scan_agent=debug` to
-see startup messages including the resolved config path and the active origin
-policy.
+See [Log files](#log-files) below for the on-disk location and rotation
+policy. To raise verbosity, set `RUST_LOG=scan_agent=debug` — startup
+messages include the resolved config path and the active origin policy, and
+appear on both stderr and the rotated log file.
 
 ### Exit code 2
 
@@ -76,3 +77,24 @@ a one-line note that the template was written.
 
 Delete `%APPDATA%\com.rswebtwain.agent\config.toml` and relaunch the agent.
 The next startup writes a fresh commented template.
+
+## Log files
+
+The agent and its 32-bit sidecar write rotated log files to:
+
+```
+%APPDATA%\com.rswebtwain.app\logs\
+  agent.log.YYYY-MM-DD     # main agent
+  sidecar.log.YYYY-MM-DD   # 32-bit TWAIN sidecar
+```
+
+Files rotate daily. The 7 most recent dated files per binary are kept; older
+files are deleted on agent startup. The current day's file is always kept.
+
+To raise log verbosity, set `RUST_LOG` in the environment before launching the
+agent — for example `RUST_LOG=scan_agent=debug,scanner_sidecar=debug`. The
+sidecar inherits this from the parent process.
+
+To override the log directory entirely, set `RSWEBTWAIN_LOG_DIR` to an absolute
+path before launching. If the directory cannot be created or written, the agent
+falls back to stderr-only logging without failing startup.
