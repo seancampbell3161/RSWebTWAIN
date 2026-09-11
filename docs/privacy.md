@@ -14,9 +14,10 @@ origins are configurable; see [configuration.md](configuration.md).
 
 ## Local data
 
-Configuration and the optional auth token are stored locally under
-`%APPDATA%\com.rswebtwain.agent\`. The auth token is encrypted at rest using
-Windows DPAPI under the current user's scope.
+Configuration is stored locally under `%APPDATA%\com.rswebtwain.app\`, in
+plain text. If a deployer sets an optional auth token (see
+[integration.md](integration.md#optional-shared-token)), it is stored in
+that same config file, also in plain text.
 
 ## Scanned images
 
