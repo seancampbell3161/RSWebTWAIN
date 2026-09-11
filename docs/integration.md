@@ -27,6 +27,9 @@ There is no discovery mechanism — if you're targeting an installation that
 has been reconfigured to a non-default port, your page needs to be told
 that port some other way (a settings screen, a query parameter, etc.).
 
+If your page is served over `https://`, see [Mixed content](#mixed-content)
+below before you wire this up.
+
 A `ping` is the simplest way to confirm the connection is alive before doing
 anything else:
 
@@ -56,6 +59,27 @@ extra_origins = ["https://app.example.com"]
 — adding a production origin does not, by itself, stop local pages from
 connecting too. Set `allow_localhost = false` if you want to block
 localhost origins entirely.
+
+## Mixed content
+
+The agent serves plain `ws://` on loopback only — it has no TLS support and
+ships no certificate. A page loaded over `https://` that opens a `ws://`
+connection is making a mixed-content request, and browsers restrict mixed
+content. How far that restriction goes — whether it's blocked outright or
+loopback addresses are treated as an exception — has varied across browsers
+and versions, so this guide won't claim a fixed answer here; verify it in
+the browsers your integration needs to support.
+
+In practice: a page served over plain `http://`, including
+`http://localhost` during development, is unaffected. A production page
+served over `https://` is the case at risk, and when a browser does block
+the connection it typically doesn't surface a clear "mixed content" error —
+the WebSocket just fails to open.
+
+There's no server-side fix available — the agent doesn't offer a `wss://`
+option. If mixed-content restrictions affect the browsers you target, treat
+it as a constraint to design around rather than something the agent can be
+configured to avoid.
 
 ## A worked exchange
 
@@ -160,6 +184,11 @@ parameter:
 ```
 ws://127.0.0.1:47115/?token=change-me
 ```
+
+Stick to URL-safe characters when choosing a token (letters, digits, `-`,
+`_`): the agent reads the query string by splitting on `&` and then `=`, so
+a token containing either of those, or a `%` or a space, must be
+percent-encoded in the connect URL or it won't be read back correctly.
 
 The same value has to go in both places — the config file and the
 connecting page. This only makes sense when the deployer controls both; a
