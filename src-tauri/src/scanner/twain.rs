@@ -562,6 +562,21 @@ impl SourceOpened {
         // Set transfer mechanism to memory
         self.set_capability_u16(ICAP_XFERMECH, TWSX_MEMORY);
 
+        // Pin the assumptions `raw::normalize` decodes against, rather than
+        // inheriting whatever a given source happens to default to. Keep this
+        // block in step with the sidecar's copy in scanner-sidecar/src/main.rs
+        // — tests/capability_parity.rs fails if the two drift apart.
+
+        // Uncompressed strips only; transfer_memory rejects anything else.
+        self.set_capability_u16(ICAP_COMPRESSION, TWCP_NONE);
+
+        // A 0 bit is black, so 1bpp expansion is not inverted.
+        self.set_capability_u16(ICAP_PIXELFLAVOR, TWPF_CHOCOLATE);
+
+        // The leftmost pixel is the byte's most significant bit, which is the
+        // order `raw::normalize` unpacks 1bpp data in.
+        self.set_capability_u16(ICAP_BITORDER, TWBO_MSBFIRST);
+
         // Configure ADF (automatic document feeder)
         if options.use_adf {
             self.set_capability_bool(CAP_FEEDERENABLED, true);

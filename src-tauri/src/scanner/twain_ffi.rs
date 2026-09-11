@@ -351,15 +351,15 @@ pub const TWCC_SUCCESS: TW_UINT16 = 0;
 pub const TWCC_BUMMER: TW_UINT16 = 1;
 pub const TWCC_LOWMEMORY: TW_UINT16 = 2;
 pub const TWCC_NODS: TW_UINT16 = 3;
-pub const TWCC_OPERATIONERROR: TW_UINT16 = 6;
-pub const TWCC_BADCAP: TW_UINT16 = 9;
+pub const TWCC_OPERATIONERROR: TW_UINT16 = 5;
+pub const TWCC_BADCAP: TW_UINT16 = 6;
 pub const TWCC_BADVALUE: TW_UINT16 = 10;
 pub const TWCC_SEQERROR: TW_UINT16 = 11;
 pub const TWCC_BADDEST: TW_UINT16 = 12;
 pub const TWCC_CAPUNSUPPORTED: TW_UINT16 = 13;
 pub const TWCC_CAPBADOPERATION: TW_UINT16 = 14;
-pub const TWCC_PAPERJAM: TW_UINT16 = 16;
-pub const TWCC_PAPERDOUBLEFEED: TW_UINT16 = 17;
+pub const TWCC_PAPERJAM: TW_UINT16 = 20;
+pub const TWCC_PAPERDOUBLEFEED: TW_UINT16 = 21;
 
 // Constants: Capabilities (CAP_* / ICAP_*)
 
@@ -371,7 +371,8 @@ pub const CAP_DUPLEX: TW_UINT16 = 0x1012;
 pub const CAP_DUPLEXENABLED: TW_UINT16 = 0x1013;
 
 pub const ICAP_COMPRESSION: TW_UINT16 = 0x0100;
-pub const ICAP_PIXELFLAVOR: TW_UINT16 = 0x0103;
+pub const ICAP_PIXELFLAVOR: TW_UINT16 = 0x111f;
+pub const ICAP_BITORDER: TW_UINT16 = 0x111c;
 pub const ICAP_PIXELTYPE: TW_UINT16 = 0x0101;
 pub const ICAP_UNITS: TW_UINT16 = 0x0102;
 pub const ICAP_XFERMECH: TW_UINT16 = 0x0103;
@@ -386,6 +387,12 @@ pub const TWPT_BW: TW_UINT16 = 0;
 pub const TWPF_CHOCOLATE: TW_UINT16 = 0;
 /// Pixel flavour: a 0 value is the lightest (white).
 pub const TWPF_VANILLA: TW_UINT16 = 1;
+
+// Constants: Bit Order (TWBO_*) — bit order within a byte for 1-bit data.
+/// The leftmost pixel is the byte's least significant bit.
+pub const TWBO_LSBFIRST: TW_UINT16 = 0;
+/// The leftmost pixel is the byte's most significant bit.
+pub const TWBO_MSBFIRST: TW_UINT16 = 1;
 pub const TWPT_GRAY: TW_UINT16 = 1;
 pub const TWPT_RGB: TW_UINT16 = 2;
 pub const TWPT_PALETTE: TW_UINT16 = 3;
@@ -410,7 +417,7 @@ pub const TWSX_MEMFILE: TW_UINT16 = 4;
 
 pub const TWCP_NONE: TW_UINT16 = 0;
 pub const TWCP_GROUP31D: TW_UINT16 = 2;
-pub const TWCP_GROUP32D: TW_UINT16 = 3;
+pub const TWCP_GROUP32D: TW_UINT16 = 4;
 pub const TWCP_GROUP4: TW_UINT16 = 5;
 pub const TWCP_JPEG: TW_UINT16 = 6;
 
@@ -668,8 +675,36 @@ mod tests {
         assert_eq!(TWPT_RGB, 2);
         // Pixel flavour decides whether a 0 bit is black or white; twain.h
         // defines CHOCOLATE as 0 meaning darkest.
-        assert_eq!(ICAP_PIXELFLAVOR, 0x0103);
+        assert_eq!(ICAP_PIXELFLAVOR, 0x111f);
         assert_eq!(TWPF_CHOCOLATE, 0);
         assert_eq!(TWPF_VANILLA, 1);
+
+        // Bit order within a byte for 1-bit data. `raw::normalize` unpacks
+        // MSB-first, so `configure` pins this rather than leaving it to the
+        // source's default.
+        assert_eq!(ICAP_BITORDER, 0x111c);
+        assert_eq!(TWBO_LSBFIRST, 0);
+        assert_eq!(TWBO_MSBFIRST, 1);
+    }
+
+    /// Condition codes are decimal in twain.h and were transcribed here as if
+    /// they were hex. The consequence was not cosmetic: a real paper jam
+    /// (20) did not match our constant, while TWCC_DENIED (16) was reported
+    /// to clients as a paper jam.
+    #[test]
+    fn condition_codes_match_twain_spec() {
+        assert_eq!(TWCC_OPERATIONERROR, 5);
+        assert_eq!(TWCC_BADCAP, 6);
+        assert_eq!(TWCC_PAPERJAM, 20);
+        assert_eq!(TWCC_PAPERDOUBLEFEED, 21);
+    }
+
+    #[test]
+    fn compression_constants_match_twain_spec() {
+        assert_eq!(TWCP_NONE, 0);
+        assert_eq!(TWCP_GROUP31D, 2);
+        assert_eq!(TWCP_GROUP32D, 4);
+        assert_eq!(TWCP_GROUP4, 5);
+        assert_eq!(TWCP_JPEG, 6);
     }
 }
