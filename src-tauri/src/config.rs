@@ -1,14 +1,14 @@
-//! Per-installation configuration loaded from `%APPDATA%\com.rswebtwain.agent\config.toml`.
+//! Per-installation configuration loaded from `%APPDATA%\com.rswebtwain.app\config.toml`.
 //!
 //! Missing config = built-in defaults (port 47115, localhost-only origins).
-//! Env vars (`RSWEBTWAIN_PORT`, `RSWEBTWAIN_ALLOWED_ORIGINS`) override config values.
+//! Env vars (`RSWEBTWAIN_PORT`, `RSWEBTWAIN_ALLOWED_ORIGINS`, `RSWEBTWAIN_AUTH_TOKEN`) override config values.
 
 use std::path::Path;
 
 use serde::Deserialize;
 
 const TEMPLATE: &str = r#"# RSWebTWAIN agent configuration
-# Location: %APPDATA%\com.rswebtwain.agent\config.toml
+# Location: %APPDATA%\com.rswebtwain.app\config.toml
 #
 # This file is OPTIONAL. With no config file, the agent accepts WebSocket
 # connections from any http(s)://localhost or 127.0.0.1 origin (any port)
@@ -18,8 +18,9 @@ const TEMPLATE: &str = r#"# RSWebTWAIN agent configuration
 #   - Allow a production frontend served from a real domain
 #   - Lock down localhost (set allow_localhost = false)
 #   - Change the listening port
+#   - Require a shared authentication token
 #
-# Environment variables (RSWEBTWAIN_PORT, RSWEBTWAIN_ALLOWED_ORIGINS) override these values.
+# Environment variables (RSWEBTWAIN_PORT, RSWEBTWAIN_ALLOWED_ORIGINS, RSWEBTWAIN_AUTH_TOKEN) override these values.
 # RSWEBTWAIN_ALLOWED_ORIGINS, when set, REPLACES the entire origin policy
 # (sets allow_localhost = false). To keep localhost via env, list it explicitly.
 
@@ -31,6 +32,12 @@ const TEMPLATE: &str = r#"# RSWebTWAIN agent configuration
 
 # Additional exact-match origins (production frontends).
 # extra_origins = ["https://app.example.com"]
+
+# Optional shared secret. When set, pages must connect to
+#   ws://127.0.0.1:47115/?token=<value>
+# Leave it commented out unless you control both this file and the page that
+# connects, and you need a second factor alongside origin checking.
+# auth_token = "change-me"
 "#;
 
 pub const DEFAULT_PORT: u16 = 47115;
@@ -47,6 +54,11 @@ pub struct ServerConfig {
     pub port: u16,
     pub allow_localhost: bool,
     pub extra_origins: Vec<String>,
+    /// Optional shared secret. When set, clients must connect with
+    /// `?token=<value>`. Unset by default: origin validation is the primary
+    /// defence, and a token only helps where a deployer can put the same
+    /// value in both the config and the page.
+    pub auth_token: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -55,6 +67,7 @@ impl Default for ServerConfig {
             port: DEFAULT_PORT,
             allow_localhost: true,
             extra_origins: Vec::new(),
+            auth_token: None,
         }
     }
 }
@@ -129,6 +142,17 @@ pub fn apply_env_overrides(config: &mut AgentConfig) {
             config.server.extra_origins = parsed;
         }
     }
+
+    if let Ok(val) = std::env::var("RSWEBTWAIN_AUTH_TOKEN") {
+        if val.trim().is_empty() {
+            tracing::warn!(
+                "RSWEBTWAIN_AUTH_TOKEN is set but empty; keeping the configured value"
+            );
+        } else {
+            tracing::info!("Auth token overridden by RSWEBTWAIN_AUTH_TOKEN");
+            config.server.auth_token = Some(val);
+        }
+    }
 }
 
 pub fn write_template_if_missing(config_path: &Path) -> std::io::Result<bool> {
@@ -161,6 +185,15 @@ fn validate(cfg: &AgentConfig) -> Result<(), ConfigError> {
                     "extra origin '{o}' uses unsupported scheme '{other}' (expected http or https)"
                 )));
             }
+        }
+    }
+    if let Some(token) = &cfg.server.auth_token {
+        if token.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "auth_token is set but empty; remove the line to disable \
+                 token authentication, or give it a value"
+                    .to_string(),
+            ));
         }
     }
     Ok(())
@@ -423,5 +456,58 @@ mod tests {
         write_template_if_missing(&path).unwrap();
         let cfg = load_or_default(&path).expect("template must parse cleanly");
         assert_eq!(cfg, AgentConfig::default());
+    }
+
+    #[test]
+    fn auth_token_absent_is_none() {
+        let cfg = parse("[server]\nport = 47115\n");
+        assert_eq!(cfg.server.auth_token, None);
+    }
+
+    #[test]
+    fn auth_token_parses_from_config() {
+        let cfg = parse("[server]\nauth_token = \"s3cret\"\n");
+        assert_eq!(cfg.server.auth_token.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn empty_auth_token_is_rejected() {
+        // An empty token silently disables authentication for a deployer who
+        // believes they enabled it — the most dangerous way to get this wrong.
+        let cfg = parse("[server]\nauth_token = \"\"\n");
+        let err = validate(&cfg).expect_err("empty auth_token must be rejected");
+        assert!(
+            matches!(err, ConfigError::Invalid(_)),
+            "expected Invalid, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_auth_token_is_rejected() {
+        let cfg = parse("[server]\nauth_token = \"   \"\n");
+        assert!(validate(&cfg).is_err());
+    }
+
+    #[test]
+    fn env_overrides_auth_token() {
+        with_env(&[("RSWEBTWAIN_AUTH_TOKEN", Some("from-env"))], || {
+            let mut cfg = AgentConfig::default();
+            apply_env_overrides(&mut cfg);
+            assert_eq!(cfg.server.auth_token.as_deref(), Some("from-env"));
+        });
+    }
+
+    #[test]
+    fn env_empty_auth_token_is_ignored() {
+        with_env(&[("RSWEBTWAIN_AUTH_TOKEN", Some(""))], || {
+            let mut cfg = AgentConfig::default();
+            cfg.server.auth_token = Some("from-file".to_string());
+            apply_env_overrides(&mut cfg);
+            assert_eq!(
+                cfg.server.auth_token.as_deref(),
+                Some("from-file"),
+                "an empty env value must not silently disable a configured token"
+            );
+        });
     }
 }
