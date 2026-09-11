@@ -745,9 +745,67 @@ async fn allow_all_accepts_anything() {
     handler.abort();
 }
 
+/// One completed binary transfer: what it carried and the bytes that arrived.
+struct Transfer {
+    kind: String,
+    page: Option<u64>,
+    bytes: Vec<u8>,
+}
+
+/// Reassembles `binary_start` announcements and the binary frames that follow.
+///
+/// Driven by `total_bytes`, exactly as a real client must be: the chunk size
+/// is an implementation detail, so no frame count is assumed anywhere here.
+#[derive(Default)]
+struct TransferCollector {
+    /// kind, page, announced size, bytes so far.
+    pending: Option<(String, Option<u64>, usize, Vec<u8>)>,
+}
+
+impl TransferCollector {
+    fn begin(&mut self, msg: &serde_json::Value) {
+        assert!(
+            self.pending.is_none(),
+            "a new transfer began before the previous one finished"
+        );
+        self.pending = Some((
+            msg["kind"].as_str().expect("kind").to_string(),
+            msg["page"].as_u64(),
+            msg["total_bytes"].as_u64().expect("total_bytes") as usize,
+            Vec::new(),
+        ));
+    }
+
+    /// Absorb one binary frame, yielding the transfer once it is whole.
+    fn chunk(&mut self, chunk: &[u8]) -> Option<Transfer> {
+        let (kind, page, total, buf) = self
+            .pending
+            .as_mut()
+            .expect("binary frame arrived with no preceding binary_start");
+        buf.extend_from_slice(chunk);
+        if buf.len() < *total {
+            return None;
+        }
+        assert_eq!(buf.len(), *total, "transfer overshot total_bytes");
+        let transfer = Transfer {
+            kind: kind.clone(),
+            page: *page,
+            bytes: std::mem::take(buf),
+        };
+        self.pending = None;
+        Some(transfer)
+    }
+
+    fn is_idle(&self) -> bool {
+        self.pending.is_none()
+    }
+}
+
 /// A sidecar that emits real page bitmaps exercises the stride-handling path:
 /// the source reports padded rows, and the agent must strip that padding
-/// rather than hand a mis-sized buffer to the image encoder.
+/// rather than hand a mis-sized buffer to the image encoder. The reassembled
+/// frames are decoded, so a mangled stride shows up as a broken image rather
+/// than as bytes nobody looked at.
 #[tokio::test]
 async fn sidecar_pages_with_padded_rows_reach_the_client() {
     let _env = SIDECAR_ENV.lock().await;
@@ -796,35 +854,405 @@ async fn sidecar_pages_with_padded_rows_reach_the_client() {
     .await
     .unwrap();
 
-    let mut pages = 0;
+    let mut collector = TransferCollector::default();
+    let mut pages: Vec<Transfer> = Vec::new();
     let mut completed = false;
-    for _ in 0..20 {
+
+    for _ in 0..200 {
         let response = tokio::time::timeout(std::time::Duration::from_secs(15), rx.next())
             .await
             .expect("Timeout waiting for scan messages")
             .expect("Stream ended")
             .expect("WS error");
-        let v: serde_json::Value = serde_json::from_str(&response.into_text().unwrap()).unwrap();
 
-        match v["type"].as_str() {
-            Some("scan_page") => {
-                let data = v["data"].as_str().expect("page carries data");
-                assert!(!data.is_empty(), "page {} had empty data", v["page"]);
-                pages += 1;
+        match response {
+            Message::Text(text) => {
+                let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+                match v["type"].as_str() {
+                    Some("binary_start") => collector.begin(&v),
+                    Some("scan_complete") => {
+                        assert_eq!(v["total_pages"], 2, "got: {v}");
+                        completed = true;
+                        break;
+                    }
+                    Some("error") => panic!("scan failed: {v}"),
+                    _ => {}
+                }
             }
-            Some("scan_complete") => {
-                completed = true;
-                break;
+            Message::Binary(chunk) => {
+                if let Some(transfer) = collector.chunk(&chunk) {
+                    pages.push(transfer);
+                }
             }
-            Some("error") => panic!("scan failed: {v}"),
             _ => {}
         }
     }
 
+    handler.abort();
+
     assert!(completed, "never received scan_complete");
-    assert_eq!(pages, 2, "expected both emitted pages to arrive");
+    assert!(collector.is_idle(), "a transfer was left unfinished");
+    assert_eq!(pages.len(), 2, "expected both emitted pages to arrive");
+
+    // PNG output sends the full-resolution image, one transfer per page, and
+    // the decoded sizes are the fake's — padding stripped, nothing shifted.
+    for (index, expected) in [(0usize, (3u32, 2u32)), (1, (16, 2))] {
+        let page = &pages[index];
+        assert_eq!(page.kind, "page", "PNG output must send full pages");
+        assert_eq!(page.page, Some(index as u64 + 1), "pages arrived out of order");
+        let decoded =
+            image::load_from_memory(&page.bytes).expect("reassembled bytes must decode as PNG");
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            expected,
+            "page {} decoded at the wrong size",
+            index + 1
+        );
+    }
+}
+
+/// A full ADF hopper. The old pipeline held every page plus the assembled
+/// document in memory; this asserts the batch completes and arrives intact.
+#[tokio::test]
+async fn a_sixty_page_batch_streams_to_completion() {
+    let _env = SIDECAR_ENV.lock().await;
+    let _sidecar_env = SidecarEnv::set(&[
+        ("FAKE_SIDECAR_EMIT_PAGES", "1"),
+        ("FAKE_SIDECAR_PAGE_COUNT", "60"),
+        ("FAKE_SIDECAR_SCAN_DELAY_MS", "0"),
+    ]);
+
+    let agent_config = scan_agent_lib::config::AgentConfig::default();
+    let mut config: WsServerConfig = (&agent_config).into();
+    // The default config's origin policy is what this test wants; its fixed
+    // port is not, since every server in this binary runs concurrently.
+    config.port = 0;
+    let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
+    let event_tx = handle.event_tx.clone();
+    let handler = tokio::spawn(scan_agent_lib::command_handler(
+        handle.command_rx,
+        event_tx,
+        Some(FAKE_SIDECAR.to_string()),
+    ));
+
+    let request = ws_request_with_origin(port, "http://localhost:4200");
+    let (ws_stream, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let (mut tx, mut rx) = ws_stream.split();
+
+    // Discovery must run before the orchestrator can resolve a scanner name.
+    tx.send(Message::Text(r#"{"type":"list_scanners","id":"ls-60"}"#.into()))
+        .await
+        .unwrap();
+    let listed = tokio::time::timeout(std::time::Duration::from_secs(15), rx.next())
+        .await
+        .expect("timeout waiting for scanner_list")
+        .expect("stream ended")
+        .expect("ws error");
+    let listed: serde_json::Value =
+        serde_json::from_str(&listed.into_text().unwrap()).unwrap();
+    assert_eq!(listed["type"], "scanner_list", "got: {listed}");
+
+    tx.send(Message::Text(
+        r#"{"type":"start_scan","id":"scan-60","options":{"scanner_id":"Fake Scanner","format":"pdf"}}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    let mut collector = TransferCollector::default();
+    let mut thumbnails: Vec<Transfer> = Vec::new();
+    let mut pdf_bytes: Vec<u8> = Vec::new();
+    let mut total_pages: Option<u64> = None;
+
+    for _ in 0..20_000 {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(30), rx.next())
+            .await
+            .expect("timeout waiting for scan traffic")
+            .expect("stream ended")
+            .expect("ws error");
+
+        match msg {
+            Message::Text(text) => {
+                let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+                match v["type"].as_str() {
+                    Some("binary_start") => collector.begin(&v),
+                    Some("scan_complete") => {
+                        assert!(
+                            v.get("pdf_data").is_none(),
+                            "pdf_data must no longer be inlined"
+                        );
+                        total_pages = v["total_pages"].as_u64();
+                        break;
+                    }
+                    Some("error") => panic!("scan failed: {v}"),
+                    _ => {}
+                }
+            }
+            Message::Binary(chunk) => {
+                if let Some(transfer) = collector.chunk(&chunk) {
+                    match transfer.kind.as_str() {
+                        "thumbnail" => thumbnails.push(transfer),
+                        "pdf" => pdf_bytes = transfer.bytes,
+                        other => panic!("unexpected transfer kind: {other}"),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 
     handler.abort();
+
+    assert!(collector.is_idle(), "a transfer was left unfinished");
+    assert_eq!(total_pages, Some(60), "scan_complete should report 60 pages");
+    assert_eq!(thumbnails.len(), 60, "expected one thumbnail per page");
+    assert_eq!(
+        thumbnails.iter().filter_map(|t| t.page).collect::<Vec<_>>(),
+        (1..=60).collect::<Vec<u64>>(),
+        "thumbnails must be numbered 1..60 in order"
+    );
+    for thumb in &thumbnails {
+        image::load_from_memory(&thumb.bytes).expect("thumbnail must decode as an image");
+    }
+    assert!(
+        pdf_bytes.starts_with(b"%PDF-1.4"),
+        "reassembled bytes are not a PDF"
+    );
+    assert!(
+        String::from_utf8_lossy(&pdf_bytes).contains("/Count 60"),
+        "PDF should declare 60 pages"
+    );
+    assert!(
+        String::from_utf8_lossy(&pdf_bytes).contains("%%EOF"),
+        "PDF was never closed"
+    );
+}
+
+/// A producer that fails only after its last page has been handed over must
+/// not have cost the client a `Processing` message or the agent a finished
+/// document: the error that follows would throw both away. The ordering here
+/// — producer checked, then PDF finalized — is the whole point of the split
+/// between `consume_pages` and `finalize_pdf`.
+#[tokio::test]
+async fn a_late_producer_failure_finalizes_no_pdf() {
+    let _env = SIDECAR_ENV.lock().await;
+    let _sidecar_env = SidecarEnv::set(&[
+        ("FAKE_SIDECAR_EMIT_PAGES", "1"),
+        ("FAKE_SIDECAR_PAGE_COUNT", "3"),
+        ("FAKE_SIDECAR_SCAN_DELAY_MS", "0"),
+        ("FAKE_SIDECAR_ERROR_AFTER_PAGES", "1"),
+    ]);
+
+    let agent_config = scan_agent_lib::config::AgentConfig::default();
+    let mut config: WsServerConfig = (&agent_config).into();
+    // The default config's origin policy is what this test wants; its fixed
+    // port is not, since every server in this binary runs concurrently.
+    config.port = 0;
+    let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
+    let event_tx = handle.event_tx.clone();
+    let handler = tokio::spawn(scan_agent_lib::command_handler(
+        handle.command_rx,
+        event_tx,
+        Some(FAKE_SIDECAR.to_string()),
+    ));
+
+    let request = ws_request_with_origin(port, "http://localhost:4200");
+    let (ws_stream, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let (mut tx, mut rx) = ws_stream.split();
+
+    tx.send(Message::Text(r#"{"type":"list_scanners","id":"ls-late"}"#.into()))
+        .await
+        .unwrap();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(15), rx.next())
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("ws error");
+
+    tx.send(Message::Text(
+        r#"{"type":"start_scan","id":"scan-late","options":{"scanner_id":"Fake Scanner","format":"pdf"}}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    let mut thumbnails = 0usize;
+    let mut kinds: Vec<String> = Vec::new();
+    let mut statuses: Vec<String> = Vec::new();
+    let mut failed = false;
+
+    let mut collector = TransferCollector::default();
+    for _ in 0..500 {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(30), rx.next())
+            .await
+            .expect("timeout waiting for scan traffic")
+            .expect("stream ended")
+            .expect("ws error");
+
+        match msg {
+            Message::Text(text) => {
+                let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+                match v["type"].as_str() {
+                    Some("binary_start") => {
+                        kinds.push(v["kind"].as_str().unwrap_or_default().to_string());
+                        collector.begin(&v);
+                    }
+                    Some("scan_progress") => {
+                        statuses.push(v["status"].as_str().unwrap_or_default().to_string());
+                    }
+                    Some("scan_complete") => panic!("a failed scan must not report completion: {v}"),
+                    Some("error") if v["id"] == "scan-late" => {
+                        failed = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            Message::Binary(chunk) => {
+                if let Some(transfer) = collector.chunk(&chunk) {
+                    if transfer.kind == "thumbnail" {
+                        thumbnails += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    handler.abort();
+
+    assert!(failed, "the scan never reported the producer's failure");
+    assert_eq!(thumbnails, 3, "every page should still have been previewed");
+    assert!(
+        !kinds.iter().any(|k| k == "pdf"),
+        "a document was transferred for a scan that failed: {kinds:?}"
+    );
+    assert!(
+        !statuses.iter().any(|s| s == "processing"),
+        "client was told the PDF was being assembled, then handed an error: {statuses:?}"
+    );
+}
+
+/// Cancelling mid-batch must not leave the partially written document behind.
+#[tokio::test]
+async fn cancelling_a_scan_removes_the_temp_pdf() {
+    let _env = SIDECAR_ENV.lock().await;
+
+    /// Temp directories holding a partially written scan, if any leaked.
+    fn leaked_scan_files() -> std::collections::HashSet<std::path::PathBuf> {
+        let mut found = std::collections::HashSet::new();
+        if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+            for entry in entries.flatten() {
+                let candidate = entry.path().join("scan.pdf");
+                if candidate.exists() {
+                    found.insert(candidate);
+                }
+            }
+        }
+        found
+    }
+
+    let before = leaked_scan_files();
+
+    let _sidecar_env = SidecarEnv::set(&[
+        ("FAKE_SIDECAR_EMIT_PAGES", "1"),
+        ("FAKE_SIDECAR_PAGE_COUNT", "40"),
+        ("FAKE_SIDECAR_SCAN_DELAY_MS", "50"),
+    ]);
+
+    let agent_config = scan_agent_lib::config::AgentConfig::default();
+    let mut config: WsServerConfig = (&agent_config).into();
+    // The default config's origin policy is what this test wants; its fixed
+    // port is not, since every server in this binary runs concurrently.
+    config.port = 0;
+    let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
+    let event_tx = handle.event_tx.clone();
+    let handler = tokio::spawn(scan_agent_lib::command_handler(
+        handle.command_rx,
+        event_tx,
+        Some(FAKE_SIDECAR.to_string()),
+    ));
+
+    let request = ws_request_with_origin(port, "http://localhost:4200");
+    let (ws_stream, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let (mut tx, mut rx) = ws_stream.split();
+
+    tx.send(Message::Text(r#"{"type":"list_scanners","id":"ls-c"}"#.into()))
+        .await
+        .unwrap();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(15), rx.next())
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("ws error");
+
+    tx.send(Message::Text(
+        r#"{"type":"start_scan","id":"scan-c","options":{"scanner_id":"Fake Scanner","format":"pdf"}}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    // Let a few pages land, then cancel. The scan_id comes from the first
+    // scan_progress message.
+    let mut scan_id = String::new();
+    for _ in 0..200 {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(30), rx.next())
+            .await
+            .expect("timeout")
+            .expect("stream ended")
+            .expect("ws error");
+        if let Message::Text(text) = msg {
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            if v["type"] == "scan_progress" {
+                scan_id = v["scan_id"].as_str().unwrap_or_default().to_string();
+                if v["page"].as_u64().unwrap_or(0) >= 3 {
+                    break;
+                }
+            }
+        }
+    }
+    assert!(!scan_id.is_empty(), "never saw a scan_progress message");
+
+    tx.send(Message::Text(
+        format!(r#"{{"type":"cancel_scan","id":"c-1","scan_id":"{scan_id}"}}"#),
+    ))
+    .await
+    .unwrap();
+
+    // The scan has to actually unwind as cancelled: a run that quietly
+    // finished would also leave no temp file, and would prove nothing.
+    let mut cancelled = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        let remaining = deadline - std::time::Instant::now();
+        let Ok(Some(Ok(msg))) = tokio::time::timeout(remaining, rx.next()).await else {
+            break;
+        };
+        if let Message::Text(text) = msg {
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            match v["type"].as_str() {
+                Some("error") if v["id"] == "scan-c" => {
+                    assert_eq!(v["code"], "SCAN_CANCELLED", "expected a cancellation: {v}");
+                    cancelled = true;
+                    break;
+                }
+                Some("scan_complete") => panic!("the batch finished instead of cancelling: {v}"),
+                _ => {}
+            }
+        }
+    }
+
+    handler.abort();
+
+    assert!(cancelled, "the scan never reported cancellation");
+
+    let after = leaked_scan_files();
+    let leaked: Vec<_> = after.difference(&before).collect();
+    assert!(
+        leaked.is_empty(),
+        "cancelled scan left temp files behind: {leaked:?}"
+    );
 }
 
 /// A browser connecting to a release-shaped agent, with a valid Origin and no

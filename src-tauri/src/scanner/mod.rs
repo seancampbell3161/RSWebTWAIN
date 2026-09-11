@@ -9,8 +9,10 @@ pub mod thumbnail;
 pub mod twain;
 pub mod twain_ffi;
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use ::serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -18,8 +20,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use crate::protocol::{AgentMessage, OutputFormat, ScanRequestOptions, ScanStatus};
-use crate::ws_server::send_json;
-use crate::ws_server::ResponseSender;
+use crate::ws_server::{send_binary, send_json, ResponseSender};
 
 // Scanner trait
 
@@ -81,6 +82,12 @@ impl PageData {
         };
 
         Ok((data, color_type))
+    }
+
+    /// Tightly-packed 8-bit samples for this page, for callers that need the
+    /// pixels rather than an encoded image.
+    pub fn normalized(&self) -> Result<Vec<u8>, ScanError> {
+        Ok(self.pixels()?.0)
     }
 
     /// Convert raw bitmap data to PNG bytes
@@ -269,25 +276,137 @@ impl ScanOrchestrator {
 
 // Scan Execution (standalone, does not hold orchestrator lock)
 
-/// Consume scanned pages, emit progress and page messages, and assemble a PDF
-/// when one was requested.
+/// How often the cancel flag is re-checked while a queued send waits on a
+/// client that has stopped reading.
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Await `future`, abandoning it if the cancel flag is raised first.
 ///
-/// Shared by the native and sidecar scan paths, which differ only in how pages
-/// are produced. Returns the page count and, for PDF output, the base64 document.
+/// The response channel is bounded, so a client that stops reading parks the
+/// scan inside a send. Polling the flag alongside the send is what keeps a
+/// later `cancel_scan` from having to wait for that client to drain the queue.
+async fn until_cancelled<F>(future: F, cancel_flag: &AtomicBool) -> Result<F::Output, ScanError>
+where
+    F: Future,
+{
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            // Making progress on the send beats re-checking the flag.
+            biased;
+            output = &mut future => return Ok(output),
+            _ = tokio::time::sleep(CANCEL_POLL_INTERVAL) => {
+                if cancel_flag.load(Ordering::Acquire) {
+                    return Err(ScanError::Cancelled);
+                }
+            }
+        }
+    }
+}
+
+/// Where one scan's output goes, and whether the user has asked it to stop.
+///
+/// Bundling these keeps the transfer helpers to a readable argument list and
+/// means no send can accidentally skip the cancellation race.
+struct PageSink<'a> {
+    response_tx: &'a ResponseSender,
+    request_id: &'a str,
+    scan_id: &'a str,
+    cancel_flag: &'a AtomicBool,
+}
+
+impl PageSink<'_> {
+    async fn progress(&self, page: u32, status: ScanStatus) -> Result<(), ScanError> {
+        until_cancelled(
+            send_json(
+                self.response_tx,
+                AgentMessage::ScanProgress {
+                    id: self.request_id.to_string(),
+                    scan_id: self.scan_id.to_string(),
+                    page,
+                    status,
+                },
+            ),
+            self.cancel_flag,
+        )
+        .await
+    }
+
+    /// Announce a payload and stream it as binary frames.
+    ///
+    /// A cancellation observed mid-transfer abandons the remaining frames:
+    /// the scan is about to fail with `Cancelled`, so the client has no use
+    /// for the rest of the bytes.
+    async fn transfer(
+        &self,
+        kind: &str,
+        page: Option<u32>,
+        mime: &str,
+        bytes: &[u8],
+    ) -> Result<(), ScanError> {
+        until_cancelled(
+            send_json(
+                self.response_tx,
+                AgentMessage::BinaryStart {
+                    id: self.request_id.to_string(),
+                    scan_id: self.scan_id.to_string(),
+                    kind: kind.to_string(),
+                    page,
+                    mime: mime.to_string(),
+                    total_bytes: bytes.len(),
+                },
+            ),
+            self.cancel_flag,
+        )
+        .await?;
+
+        until_cancelled(send_binary(self.response_tx, bytes), self.cancel_flag)
+            .await?
+            .map_err(|_| ScanError::Sidecar("client disconnected during transfer".to_string()))
+    }
+}
+
+/// A document written page by page but not yet closed.
+///
+/// Fields drop in declaration order, so the writer releases its file handle
+/// before `dir` removes the directory — Windows refuses to unlink a directory
+/// that still holds an open handle.
+struct PendingPdf {
+    writer: crate::pdf::PdfWriter,
+    path: std::path::PathBuf,
+    /// Removed when this drops, on every exit path including a panic.
+    dir: tempfile::TempDir,
+}
+
+/// Consume scanned pages, streaming each one out as it arrives.
+///
+/// Shared by the native and sidecar scan paths, which differ only in how
+/// pages are produced. Returns the page count and, for PDF output, the
+/// still-open document: closing and sending it is the caller's job, because
+/// neither may happen until the producer is known to have succeeded.
 async fn consume_pages(
-    request_id: &str,
-    scan_id: &str,
+    sink: &PageSink<'_>,
     format: OutputFormat,
     page_rx: &mut mpsc::Receiver<PageData>,
-    response_tx: &ResponseSender,
-    cancel_flag: &AtomicBool,
-) -> Result<(u32, Option<String>), ScanError> {
+) -> Result<(u32, Option<PendingPdf>), ScanError> {
     let mut page_count = 0u32;
-    let mut all_pages: Vec<Vec<u8>> = Vec::new();
+
+    // PDF output writes to a temp file as pages arrive, so a batch never holds
+    // more than the page in hand.
+    let mut pdf = if matches!(format, OutputFormat::Pdf) {
+        let dir =
+            tempfile::tempdir().map_err(|e| ScanError::PdfGeneration(format!("temp dir: {e}")))?;
+        let path = dir.path().join("scan.pdf");
+        let writer = crate::pdf::PdfWriter::create(&path)
+            .map_err(|e| ScanError::PdfGeneration(e.to_string()))?;
+        Some(PendingPdf { writer, path, dir })
+    } else {
+        None
+    };
 
     while let Some(page_data) = page_rx.recv().await {
-        if cancel_flag.load(Ordering::Acquire) {
-            info!("Page processing cancelled for scan {}", scan_id);
+        if sink.cancel_flag.load(Ordering::Acquire) {
+            info!("Page processing cancelled for scan {}", sink.scan_id);
             page_rx.close();
             while page_rx.try_recv().is_ok() {}
             break;
@@ -295,99 +414,100 @@ async fn consume_pages(
 
         page_count += 1;
 
-        send_json(
-            response_tx,
-            AgentMessage::ScanProgress {
-                id: request_id.to_string(),
-                scan_id: scan_id.to_string(),
-                page: page_count,
-                status: ScanStatus::Scanning,
-            },
-        )
-        .await;
+        sink.progress(page_count, ScanStatus::Scanning).await?;
+
+        let channels = match page_data.bits_per_pixel {
+            1 | 8 => 1u8,
+            24 => 3,
+            32 => 4,
+            other => {
+                return Err(ScanError::ImageConversion(format!(
+                    "Unsupported bit depth: {other}"
+                )))
+            }
+        };
 
         match format {
             OutputFormat::Png => {
-                let png_data = page_data.to_png()?;
-                let encoded =
-                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png_data);
-                send_json(
-                    response_tx,
-                    AgentMessage::ScanPage {
-                        id: request_id.to_string(),
-                        scan_id: scan_id.to_string(),
-                        page: page_count,
-                        data: encoded,
-                        mime: "image/png".to_string(),
-                    },
-                )
-                .await;
+                let bytes = page_data.to_png()?;
+                sink.transfer("page", Some(page_count), "image/png", &bytes)
+                    .await?;
             }
             OutputFormat::Jpeg => {
-                let jpeg_data = page_data.to_jpeg(85)?;
-                let encoded =
-                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &jpeg_data);
-                send_json(
-                    response_tx,
-                    AgentMessage::ScanPage {
-                        id: request_id.to_string(),
-                        scan_id: scan_id.to_string(),
-                        page: page_count,
-                        data: encoded,
-                        mime: "image/jpeg".to_string(),
-                    },
-                )
-                .await;
+                let bytes = page_data.to_jpeg(85)?;
+                sink.transfer("page", Some(page_count), "image/jpeg", &bytes)
+                    .await?;
             }
             OutputFormat::Pdf => {
-                let png_data = page_data.to_png()?;
-                all_pages.push(png_data);
+                // Each intermediate buffer is scoped, so the full-resolution
+                // page is never alive alongside the next one or across a send.
+                {
+                    let jpeg = page_data.to_jpeg(85)?;
+                    if let Some(pending) = pdf.as_mut() {
+                        pending
+                            .writer
+                            .add_page(crate::pdf::PageSpec {
+                                jpeg: &jpeg,
+                                width_px: page_data.width,
+                                height_px: page_data.height,
+                                dpi_x: page_data.dpi_x,
+                                dpi_y: page_data.dpi_y,
+                                // JPEG embedding is grayscale or RGB; RGBA was
+                                // flattened during encoding.
+                                channels: if channels == 1 { 1 } else { 3 },
+                            })
+                            .map_err(|e| ScanError::PdfGeneration(e.to_string()))?;
+                    }
+                }
 
-                let preview = page_data.to_jpeg(60)?;
-                let encoded =
-                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &preview);
-                send_json(
-                    response_tx,
-                    AgentMessage::ScanPage {
-                        id: request_id.to_string(),
-                        scan_id: scan_id.to_string(),
-                        page: page_count,
-                        data: encoded,
-                        mime: "image/jpeg".to_string(),
-                    },
-                )
-                .await;
+                let thumb = {
+                    let pixels = page_data.normalized()?;
+                    thumbnail::thumbnail_jpeg(&pixels, page_data.width, page_data.height, channels)?
+                };
+                sink.transfer("thumbnail", Some(page_count), "image/jpeg", &thumb)
+                    .await?;
             }
         }
     }
 
-    let pdf_data = if matches!(format, OutputFormat::Pdf) && !all_pages.is_empty() {
-        send_json(
-            response_tx,
-            AgentMessage::ScanProgress {
-                id: request_id.to_string(),
-                scan_id: scan_id.to_string(),
-                page: page_count,
-                status: ScanStatus::Processing,
-            },
-        )
-        .await;
+    Ok((page_count, pdf))
+}
 
-        match crate::pdf::generate_pdf(&all_pages) {
-            Ok(pdf_bytes) => Some(base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                &pdf_bytes,
-            )),
-            Err(e) => {
-                error!("PDF generation failed: {}", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
+/// Close a document and hand it to the client.
+///
+/// Deliberately separate from `consume_pages`: the caller checks the
+/// producer's result first, so a failure that surfaces after the last page
+/// costs the client neither a `Processing` message nor a document that is
+/// about to be thrown away.
+async fn finalize_pdf(
+    sink: &PageSink<'_>,
+    page_count: u32,
+    pending: PendingPdf,
+) -> Result<(), ScanError> {
+    // Destructured rather than dropped whole so the order of the two drops
+    // below is explicit: the file closes before its directory is removed.
+    let PendingPdf { writer, path, dir } = pending;
 
-    Ok((page_count, pdf_data))
+    if writer.page_count() == 0 {
+        drop(writer);
+        drop(dir);
+        return Ok(());
+    }
+
+    sink.progress(page_count, ScanStatus::Processing).await?;
+
+    writer
+        .finish()
+        .map_err(|e| ScanError::PdfGeneration(e.to_string()))?;
+
+    // One buffer, once, bounded by the document size — not by page count.
+    let bytes =
+        std::fs::read(&path).map_err(|e| ScanError::PdfGeneration(format!("read back: {e}")))?;
+    let sent = sink.transfer("pdf", None, "application/pdf", &bytes).await;
+
+    // Explicit, so the directory outlives the read-back above.
+    drop(dir);
+    sent
 }
 
 /// Execute a native TWAIN scan and stream results back via the provided sender.
@@ -490,17 +610,18 @@ pub async fn execute_native_scan(
         Ok(())
     });
 
-    let (page_count, pdf_data) = consume_pages(
-        &request_id,
-        &scan_id,
-        format,
-        &mut page_rx,
-        &response_tx,
-        &cancel_flag,
-    )
-    .await?;
+    let sink = PageSink {
+        response_tx: &response_tx,
+        request_id: &request_id,
+        scan_id: &scan_id,
+        cancel_flag: &cancel_flag,
+    };
 
-    // Wait for scan thread to complete
+    let (page_count, pending_pdf) = consume_pages(&sink, format, &mut page_rx).await?;
+
+    // The producer's verdict gates everything below: finishing and sending a
+    // document the scan is about to report as failed wastes the work and tells
+    // the client a story the error then contradicts.
     match scan_thread.join() {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
@@ -513,14 +634,22 @@ pub async fn execute_native_scan(
         }
     }
 
-    send_json(
-        &response_tx,
-        AgentMessage::ScanComplete {
-            id: request_id,
-            scan_id,
-            total_pages: page_count,
-            pdf_data,
-        },
+    if let Some(pending) = pending_pdf {
+        finalize_pdf(&sink, page_count, pending).await?;
+    }
+
+    // Raced against cancellation like every other send, so a client that has
+    // stopped reading cannot pin the scanner open.
+    let _ = until_cancelled(
+        send_json(
+            &response_tx,
+            AgentMessage::ScanComplete {
+                id: request_id,
+                scan_id,
+                total_pages: page_count,
+            },
+        ),
+        &cancel_flag,
     )
     .await;
 
@@ -644,17 +773,17 @@ pub async fn execute_sidecar_scan(
         Ok(())
     });
 
-    let (page_count, pdf_data) = consume_pages(
-        &request_id,
-        &scan_id,
-        format,
-        &mut page_rx,
-        &response_tx,
-        &cancel_flag,
-    )
-    .await?;
+    let sink = PageSink {
+        response_tx: &response_tx,
+        request_id: &request_id,
+        scan_id: &scan_id,
+        cancel_flag: &cancel_flag,
+    };
 
-    // Wait for sidecar task to complete
+    let (page_count, pending_pdf) = consume_pages(&sink, format, &mut page_rx).await?;
+
+    // As in the native path: the producer's verdict comes before any
+    // finalization, so a late failure costs no PDF work and no `Processing`.
     match sidecar_task.await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
@@ -667,14 +796,20 @@ pub async fn execute_sidecar_scan(
         }
     }
 
-    send_json(
-        &response_tx,
-        AgentMessage::ScanComplete {
-            id: request_id,
-            scan_id,
-            total_pages: page_count,
-            pdf_data,
-        },
+    if let Some(pending) = pending_pdf {
+        finalize_pdf(&sink, page_count, pending).await?;
+    }
+
+    let _ = until_cancelled(
+        send_json(
+            &response_tx,
+            AgentMessage::ScanComplete {
+                id: request_id,
+                scan_id,
+                total_pages: page_count,
+            },
+        ),
+        &cancel_flag,
     )
     .await;
 
@@ -742,5 +877,98 @@ mod page_data_tests {
         let mut page = padded_24bpp_page(2550, 4, 7652);
         page.raw_data.truncate(100);
         assert!(page.to_png().is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+    use crate::ws_server::{OutgoingMessage, CHUNK_BYTES, RESPONSE_CHANNEL_CAPACITY};
+
+    /// The regression this guards: the response channel is bounded, so a
+    /// client that stops reading parks the scan inside a send. Before the
+    /// send was raced against the flag, a `cancel_scan` could not take effect
+    /// until that client drained the queue — which it may never do.
+    #[tokio::test]
+    async fn a_send_blocked_on_a_full_queue_still_observes_cancellation() {
+        let (tx, _rx) = mpsc::channel::<OutgoingMessage>(RESPONSE_CHANNEL_CAPACITY);
+
+        // `_rx` is deliberately never read, so once the queue is full every
+        // further send blocks for as long as the test cares to wait.
+        for _ in 0..RESPONSE_CHANNEL_CAPACITY {
+            tx.send(OutgoingMessage::Binary(vec![0])).await.unwrap();
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let raise = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            raise.store(true, Ordering::Release);
+        });
+
+        let sink = PageSink {
+            response_tx: &tx,
+            request_id: "req-1",
+            scan_id: "scan-1",
+            cancel_flag: &cancel,
+        };
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            sink.transfer("page", Some(1), "image/png", &[7u8; 64]),
+        )
+        .await
+        .expect("a blocked transfer must give up once cancellation is raised");
+
+        assert!(
+            matches!(result, Err(ScanError::Cancelled)),
+            "expected Cancelled, got {result:?}"
+        );
+    }
+
+    /// The other half of that race: nothing must be abandoned while the
+    /// client is keeping up, and the announced length must be the real one.
+    #[tokio::test]
+    async fn an_uncancelled_transfer_announces_and_delivers_every_byte() {
+        let (tx, mut rx) = mpsc::channel::<OutgoingMessage>(RESPONSE_CHANNEL_CAPACITY);
+
+        let reader = tokio::spawn(async move {
+            let mut announced = None;
+            let mut bytes = Vec::new();
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    OutgoingMessage::Json(m) => {
+                        if let AgentMessage::BinaryStart {
+                            kind, total_bytes, ..
+                        } = *m
+                        {
+                            announced = Some((kind, total_bytes));
+                        }
+                    }
+                    OutgoingMessage::Binary(chunk) => bytes.extend_from_slice(&chunk),
+                }
+            }
+            (announced, bytes)
+        });
+
+        let payload = vec![3u8; CHUNK_BYTES * 2 + 1];
+        let cancel = AtomicBool::new(false);
+        {
+            let sink = PageSink {
+                response_tx: &tx,
+                request_id: "req-1",
+                scan_id: "scan-1",
+                cancel_flag: &cancel,
+            };
+            sink.transfer("page", Some(1), "image/png", &payload)
+                .await
+                .expect("an unhindered transfer must succeed");
+        }
+        drop(tx);
+
+        let (announced, bytes) = reader.await.unwrap();
+        assert_eq!(announced, Some(("page".to_string(), payload.len())));
+        assert_eq!(bytes, payload, "the transfer lost or reordered bytes");
     }
 }

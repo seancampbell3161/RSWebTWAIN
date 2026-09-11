@@ -80,19 +80,23 @@ pub enum AgentMessage {
         page: u32,
         status: ScanStatus,
     },
-    ScanPage {
+    /// Announces a binary transfer. The bytes follow as binary WebSocket
+    /// frames, which the client accumulates until `total_bytes` is reached.
+    BinaryStart {
         id: String,
         scan_id: String,
-        page: u32,
-        data: String,
+        /// "thumbnail", "page" or "pdf".
+        kind: String,
+        /// Page number for "thumbnail" and "page"; absent for "pdf".
+        #[serde(skip_serializing_if = "Option::is_none")]
+        page: Option<u32>,
         mime: String,
+        total_bytes: usize,
     },
     ScanComplete {
         id: String,
         scan_id: String,
         total_pages: u32,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pdf_data: Option<String>,
     },
     Error {
         id: String,
@@ -304,19 +308,52 @@ mod tests {
     }
 
     #[test]
-    fn serialize_scan_complete_without_pdf() {
+    fn serialize_scan_complete() {
         let msg = AgentMessage::ScanComplete {
             id: "req-6".to_string(),
             scan_id: "scan-1".to_string(),
             total_pages: 3,
-            pdf_data: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "scan_complete");
         assert_eq!(v["total_pages"], 3);
-        // pdf_data should be absent (skip_serializing_if = None)
-        assert!(v.get("pdf_data").is_none());
+        // The document itself arrives as binary frames, never inlined here,
+        // so completion carries nothing but the count.
+        assert_eq!(v.as_object().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn serialize_binary_start() {
+        let msg = AgentMessage::BinaryStart {
+            id: "req-2".to_string(),
+            scan_id: "a1b2".to_string(),
+            kind: "thumbnail".to_string(),
+            page: Some(3),
+            mime: "image/jpeg".to_string(),
+            total_bytes: 20481,
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+        assert_eq!(v["type"], "binary_start");
+        assert_eq!(v["kind"], "thumbnail");
+        assert_eq!(v["page"], 3);
+        assert_eq!(v["total_bytes"], 20481);
+    }
+
+    #[test]
+    fn binary_start_omits_page_for_the_pdf() {
+        let msg = AgentMessage::BinaryStart {
+            id: "req-2".to_string(),
+            scan_id: "a1b2".to_string(),
+            kind: "pdf".to_string(),
+            page: None,
+            mime: "application/pdf".to_string(),
+            total_bytes: 4096,
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+        assert!(v.get("page").is_none());
     }
 
     #[test]
