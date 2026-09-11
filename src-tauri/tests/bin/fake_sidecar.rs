@@ -16,6 +16,12 @@
 //! Tunables for the `ready` behaviour (env vars):
 //!   - `FAKE_SIDECAR_SCAN_DELAY_MS` : milliseconds to hold the scan open
 //!     between `scan_progress` and `scan_complete` (default 1000).
+//!   - `FAKE_SIDECAR_EMIT_PAGES`    : when set, emit two real `scan_page`
+//!     bitmaps whose rows carry padding (24bpp and 1bpp) before completing,
+//!     so the parent's stride handling is exercised end to end.
+//!
+//! These are process-global, so tests that depend on them must serialise —
+//! see `SIDECAR_ENV` in `tests/ws_integration.rs`.
 
 use std::env;
 use std::fs;
@@ -69,6 +75,24 @@ fn handle_flaky(behavior: &str) {
     }
 }
 
+/// Emit two pages whose rows carry real padding, so the parent has to honour
+/// `bytes_per_row` rather than assume tightly-packed rows.
+///
+/// Page 1: 3px x 2 rows of 24bpp colour. A row of pixels is 9 bytes, padded
+///         to a 12-byte stride.
+/// Page 2: 16px x 2 rows of 1bpp black-and-white. A row is 2 bytes, padded
+///         to a 4-byte stride.
+fn emit_padded_pages() {
+    println!(
+        r#"{{"type":"scan_page","page":1,"width":3,"height":2,"bits_per_pixel":24,"bytes_per_row":12,"data":"AQIDBAUGBwgJqqqqCgsMDQ4PEBESqqqq"}}"#
+    );
+    io::stdout().flush().ok();
+    println!(
+        r#"{{"type":"scan_page","page":2,"width":16,"height":2,"bits_per_pixel":1,"bytes_per_row":4,"data":"qsyqqvAPqqo="}}"#
+    );
+    io::stdout().flush().ok();
+}
+
 fn print_ready_and_wait() {
     println!(r#"{{"type":"ready"}}"#);
     io::stdout().flush().ok();
@@ -77,6 +101,8 @@ fn print_ready_and_wait() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1000);
+
+    let emit_pages = env::var("FAKE_SIDECAR_EMIT_PAGES").is_ok();
 
     let stdin = io::stdin();
     let mut lock = stdin.lock();
@@ -99,7 +125,13 @@ fn print_ready_and_wait() {
                     println!(r#"{{"type":"scan_progress","page":1,"status":"scanning"}}"#);
                     io::stdout().flush().ok();
                     thread::sleep(Duration::from_millis(scan_delay_ms));
-                    println!(r#"{{"type":"scan_complete","total_pages":0}}"#);
+
+                    if emit_pages {
+                        emit_padded_pages();
+                        println!(r#"{{"type":"scan_complete","total_pages":2}}"#);
+                    } else {
+                        println!(r#"{{"type":"scan_complete","total_pages":0}}"#);
+                    }
                     io::stdout().flush().ok();
                 }
                 // Other commands (cancel, etc.) are silently ignored.

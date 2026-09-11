@@ -56,6 +56,7 @@ enum SidecarResponse {
         width: u32,
         height: u32,
         bits_per_pixel: u16,
+        bytes_per_row: u32,
         data: String, // base64-encoded
     },
     ScanComplete {
@@ -478,6 +479,10 @@ fn handle_scan(
     set_capability_fix32(&mut app_id, &mut source_id, entry, ICAP_XRESOLUTION, resolution as f32);
     set_capability_fix32(&mut app_id, &mut source_id, entry, ICAP_YRESOLUTION, resolution as f32);
     set_capability_u16(&mut app_id, &mut source_id, entry, ICAP_XFERMECH, TWSX_MEMORY);
+    // Uncompressed strips only; the transfer loop rejects anything else.
+    set_capability_u16(&mut app_id, &mut source_id, entry, ICAP_COMPRESSION, TWCP_NONE);
+    // Pin pixel flavour so a 0 bit is unambiguously black.
+    set_capability_u16(&mut app_id, &mut source_id, entry, ICAP_PIXELFLAVOR, TWPF_CHOCOLATE);
 
     if use_adf {
         set_capability_bool(&mut app_id, &mut source_id, entry, CAP_FEEDERENABLED, true);
@@ -628,6 +633,8 @@ fn handle_scan(
             let buf_size = setup.Preferred as usize;
             let mut buffer = vec![0u8; buf_size];
             let mut image_data = Vec::new();
+            let mut bytes_per_row: u32 = 0;
+            let mut compressed = false;
 
             // Memory transfer loop for this page
             loop {
@@ -652,6 +659,19 @@ fn handle_scan(
                 };
 
                 if rc == TWRC_SUCCESS || rc == TWRC_XFERDONE {
+                    // Only uncompressed memory transfers are a raw bitmap.
+                    if mem_xfer.Compression != TWCP_NONE {
+                        error!(
+                            "Source returned compressed data (type {})",
+                            mem_xfer.Compression
+                        );
+                        compressed = true;
+                        break;
+                    }
+                    // Row stride is constant; take it from the first strip.
+                    if bytes_per_row == 0 {
+                        bytes_per_row = mem_xfer.BytesPerRow;
+                    }
                     let bytes_written = mem_xfer.BytesWritten as usize;
                     image_data.extend_from_slice(&buffer[..bytes_written]);
                     if rc == TWRC_XFERDONE {
@@ -663,6 +683,15 @@ fn handle_scan(
                 }
             }
 
+            if compressed {
+                send_response(&SidecarResponse::Error {
+                    message: "Source returned compressed image data; only \
+                              uncompressed memory transfers are supported"
+                        .to_string(),
+                });
+                break;
+            }
+
             // Send page with base64-encoded raw bitmap
             let encoded = base64::engine::general_purpose::STANDARD.encode(&image_data);
             send_response(&SidecarResponse::ScanPage {
@@ -670,6 +699,7 @@ fn handle_scan(
                 width: image_info.ImageWidth as u32,
                 height: image_info.ImageLength as u32,
                 bits_per_pixel: image_info.BitsPerPixel as u16,
+                bytes_per_row,
                 data: encoded,
             });
 
