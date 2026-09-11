@@ -484,17 +484,21 @@ async fn finalize_pdf(
     page_count: u32,
     pending: PendingPdf,
 ) -> Result<(), ScanError> {
-    // Destructured rather than dropped whole so the order of the two drops
-    // below is explicit: the file closes before its directory is removed.
-    let PendingPdf { writer, path, dir } = pending;
-
-    if writer.page_count() == 0 {
-        drop(writer);
-        drop(dir);
+    // `pending` is deliberately kept whole across both fallible steps below.
+    // Taking it apart first would put the pieces in local bindings, which drop
+    // in *reverse* declaration order — dropping the directory while the writer
+    // still holds the file open. Windows then refuses to remove the directory
+    // and `TempDir::drop` swallows the failure, stranding a half-written scan
+    // in %TEMP%. As one value it drops by field order instead: writer first.
+    if pending.writer.page_count() == 0 {
         return Ok(());
     }
 
     sink.progress(page_count, ScanStatus::Processing).await?;
+
+    // Past this point the only exit is through `finish`, which consumes the
+    // writer and closes the file, so the pieces are safe to separate.
+    let PendingPdf { writer, path, dir } = pending;
 
     writer
         .finish()
