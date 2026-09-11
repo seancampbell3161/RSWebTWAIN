@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use crate::protocol::{AgentMessage, OutputFormat, ScanRequestOptions, ScanStatus};
-use crate::ws_server::{send_binary, send_json, ResponseSender};
+use crate::ws_server::{send_binary, send_json, ResponseSender, CHUNK_BYTES};
 
 // Scanner trait
 
@@ -110,12 +110,21 @@ impl PageData {
 
         let (data, color_type) = self.pixels()?;
 
-        // JPEG carries no alpha channel.
-        if matches!(color_type, image::ExtendedColorType::Rgba8) {
-            return Err(ScanError::ImageConversion(
-                "JPEG unsupported for 32 bpp".to_string(),
-            ));
-        }
+        // JPEG carries no alpha channel, so a 32 bpp page is flattened to RGB
+        // rather than rejected. Dropping the channel here is what keeps a
+        // 32 bpp source producing a PDF at all.
+        let (data, color_type) = if matches!(color_type, image::ExtendedColorType::Rgba8) {
+            let rgba =
+                image::RgbaImage::from_raw(self.width, self.height, data).ok_or_else(|| {
+                    ScanError::ImageConversion("32 bpp buffer rejected by decoder".to_string())
+                })?;
+            (
+                image::DynamicImage::ImageRgba8(rgba).to_rgb8().into_raw(),
+                image::ExtendedColorType::Rgb8,
+            )
+        } else {
+            (data, color_type)
+        };
 
         let mut buf = Vec::new();
         image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut buf), quality)
@@ -280,6 +289,17 @@ impl ScanOrchestrator {
 /// client that has stopped reading.
 const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Depth of the raw-page channel between a producer and `consume_pages`.
+///
+/// Deliberately shallow, and not a knob to turn up: every slot holds an
+/// un-encoded page — ~25 MB at 300 dpi colour letter — so depth is paid in
+/// tens of megabytes apiece. It buys nothing either, because the producer is
+/// a physical scanner taking seconds per page while the consumer encodes in
+/// tens of milliseconds; the queue is empty in steady state. A depth of one
+/// still lets the scanner pull the next sheet while the previous page is
+/// being encoded, which is the only overlap there is to win.
+const PAGE_CHANNEL_CAPACITY: usize = 1;
+
 /// Await `future`, abandoning it if the cancel flag is raised first.
 ///
 /// The response channel is bounded, so a client that stops reading parks the
@@ -332,7 +352,45 @@ impl PageSink<'_> {
         .await
     }
 
-    /// Announce a payload and stream it as binary frames.
+    /// Announce a transfer. The client reads `total_bytes` of binary frames
+    /// after this, so the figure has to be the real one.
+    async fn announce(
+        &self,
+        kind: &str,
+        page: Option<u32>,
+        mime: &str,
+        total_bytes: usize,
+    ) -> Result<(), ScanError> {
+        until_cancelled(
+            send_json(
+                self.response_tx,
+                AgentMessage::BinaryStart {
+                    id: self.request_id.to_string(),
+                    scan_id: self.scan_id.to_string(),
+                    kind: kind.to_string(),
+                    page,
+                    mime: mime.to_string(),
+                    total_bytes,
+                },
+            ),
+            self.cancel_flag,
+        )
+        .await
+    }
+
+    /// Queue one slice of an announced transfer.
+    ///
+    /// `send_binary` splits anything larger than `CHUNK_BYTES`, so a caller
+    /// holding the whole payload can hand it over in one call and a caller
+    /// streaming from disk can hand over a chunk at a time; both pay the same
+    /// cancellation check per frame.
+    async fn send_chunk(&self, bytes: &[u8]) -> Result<(), ScanError> {
+        until_cancelled(send_binary(self.response_tx, bytes), self.cancel_flag)
+            .await?
+            .map_err(|_| ScanError::Sidecar("client disconnected during transfer".to_string()))
+    }
+
+    /// Announce a payload already in memory and stream it as binary frames.
     ///
     /// A cancellation observed mid-transfer abandons the remaining frames:
     /// the scan is about to fail with `Cancelled`, so the client has no use
@@ -344,25 +402,46 @@ impl PageSink<'_> {
         mime: &str,
         bytes: &[u8],
     ) -> Result<(), ScanError> {
-        until_cancelled(
-            send_json(
-                self.response_tx,
-                AgentMessage::BinaryStart {
-                    id: self.request_id.to_string(),
-                    scan_id: self.scan_id.to_string(),
-                    kind: kind.to_string(),
-                    page,
-                    mime: mime.to_string(),
-                    total_bytes: bytes.len(),
-                },
-            ),
-            self.cancel_flag,
-        )
-        .await?;
+        self.announce(kind, page, mime, bytes.len()).await?;
+        self.send_chunk(bytes).await
+    }
 
-        until_cancelled(send_binary(self.response_tx, bytes), self.cancel_flag)
-            .await?
-            .map_err(|_| ScanError::Sidecar("client disconnected during transfer".to_string()))
+    /// Announce an open file and stream it a chunk at a time.
+    ///
+    /// The point of reading in slices is that a finished document — tens of
+    /// megabytes for a full hopper — is never resident: one `CHUNK_BYTES`
+    /// buffer is reused for the whole transfer. `total_bytes` comes from the
+    /// file's metadata before the first frame, and `read_exact` holds the
+    /// stream to exactly that length, so a file that turns out shorter fails
+    /// the scan rather than leaving the client waiting for bytes that never
+    /// arrive.
+    ///
+    /// The reads are the blocking `std::fs` ones deliberately: they are short
+    /// (256 KiB from a local temp file) and, unlike `tokio::fs`, the handle
+    /// closes deterministically when this returns — which the caller depends
+    /// on to unlink the enclosing directory on Windows.
+    async fn transfer_file(
+        &self,
+        kind: &str,
+        mime: &str,
+        file: &mut std::fs::File,
+        total_bytes: usize,
+    ) -> Result<(), ScanError> {
+        use std::io::Read;
+
+        self.announce(kind, None, mime, total_bytes).await?;
+
+        let mut buf = vec![0u8; CHUNK_BYTES.min(total_bytes.max(1))];
+        let mut remaining = total_bytes;
+        while remaining > 0 {
+            let want = buf.len().min(remaining);
+            file.read_exact(&mut buf[..want])
+                .map_err(|e| ScanError::PdfGeneration(format!("read back: {e}")))?;
+            self.send_chunk(&buf[..want]).await?;
+            remaining -= want;
+        }
+
+        Ok(())
     }
 }
 
@@ -407,9 +486,14 @@ async fn consume_pages(
     while let Some(page_data) = page_rx.recv().await {
         if sink.cancel_flag.load(Ordering::Acquire) {
             info!("Page processing cancelled for scan {}", sink.scan_id);
+            // Closing and draining releases a producer parked in
+            // `blocking_send` rather than leaving it wedged on a full channel.
             page_rx.close();
             while page_rx.try_recv().is_ok() {}
-            break;
+            // Cancelling must fail the scan, never end it early: a page may
+            // already have been dropped by the drain above, and reporting a
+            // short document as complete is worse than reporting nothing.
+            return Err(ScanError::Cancelled);
         }
 
         page_count += 1;
@@ -452,8 +536,9 @@ async fn consume_pages(
                                 height_px: page_data.height,
                                 dpi_x: page_data.dpi_x,
                                 dpi_y: page_data.dpi_y,
-                                // JPEG embedding is grayscale or RGB; RGBA was
-                                // flattened during encoding.
+                                // The embedded JPEG is grayscale or RGB:
+                                // `to_jpeg` flattens a 32 bpp page to RGB, so
+                                // a 4-channel source still arrives as 3 here.
                                 channels: if channels == 1 { 1 } else { 3 },
                             })
                             .map_err(|e| ScanError::PdfGeneration(e.to_string()))?;
@@ -504,12 +589,24 @@ async fn finalize_pdf(
         .finish()
         .map_err(|e| ScanError::PdfGeneration(e.to_string()))?;
 
-    // One buffer, once, bounded by the document size — not by page count.
-    let bytes =
-        std::fs::read(&path).map_err(|e| ScanError::PdfGeneration(format!("read back: {e}")))?;
-    let sent = sink.transfer("pdf", None, "application/pdf", &bytes).await;
+    // Streamed back rather than read into a `Vec`: the document is the one
+    // thing left that scales with page count, so holding it whole would undo
+    // the point of having written it incrementally.
+    let mut file = std::fs::File::open(&path)
+        .map_err(|e| ScanError::PdfGeneration(format!("read back: {e}")))?;
+    let total_bytes = file
+        .metadata()
+        .map_err(|e| ScanError::PdfGeneration(format!("read back: {e}")))?
+        .len() as usize;
 
-    // Explicit, so the directory outlives the read-back above.
+    let sent = sink
+        .transfer_file("pdf", "application/pdf", &mut file, total_bytes)
+        .await;
+
+    // Explicit and in this order: the handle has to close before the
+    // directory is unlinked. (`file` is declared after `dir`, so the early
+    // returns above already drop it first.)
+    drop(file);
     drop(dir);
     sent
 }
@@ -538,8 +635,8 @@ pub async fn execute_native_scan(
     let cancel_for_thread = cancel_flag.clone();
 
     // TWAIN operations must happen on a dedicated thread (not a tokio task)
-    // because TWAIN uses Windows message pumping which blocks
-    let (page_tx, mut page_rx) = mpsc::channel::<PageData>(4);
+    // because TWAIN uses Windows message pumping which blocks.
+    let (page_tx, mut page_rx) = mpsc::channel::<PageData>(PAGE_CHANNEL_CAPACITY);
 
     let scan_thread = std::thread::spawn(move || -> Result<(), ScanError> {
         let pre = twain::PreSession::new();
@@ -643,8 +740,11 @@ pub async fn execute_native_scan(
     }
 
     // Raced against cancellation like every other send, so a client that has
-    // stopped reading cannot pin the scanner open.
-    let _ = until_cancelled(
+    // stopped reading cannot pin the scanner open. Losing that race is
+    // reported rather than swallowed: every scan owes the client exactly one
+    // of `scan_complete` or `error`, and discarding this would deliver
+    // neither.
+    until_cancelled(
         send_json(
             &response_tx,
             AgentMessage::ScanComplete {
@@ -655,7 +755,7 @@ pub async fn execute_native_scan(
         ),
         &cancel_flag,
     )
-    .await;
+    .await?;
 
     Ok(())
 }
@@ -688,7 +788,7 @@ pub async fn execute_sidecar_scan(
     let format = options.format;
     let cancel_for_blocking = cancel_flag.clone();
 
-    let (page_tx, mut page_rx) = mpsc::channel::<PageData>(4);
+    let (page_tx, mut page_rx) = mpsc::channel::<PageData>(PAGE_CHANNEL_CAPACITY);
 
     // Run sidecar I/O in a blocking task (SidecarManager uses blocking I/O)
     let sidecar_task = tokio::task::spawn_blocking(move || -> Result<(), ScanError> {
@@ -804,7 +904,10 @@ pub async fn execute_sidecar_scan(
         finalize_pdf(&sink, page_count, pending).await?;
     }
 
-    let _ = until_cancelled(
+    // As in the native path, a cancellation that beats this send is reported
+    // rather than swallowed, so the scan always ends in exactly one terminal
+    // message.
+    until_cancelled(
         send_json(
             &response_tx,
             AgentMessage::ScanComplete {
@@ -815,7 +918,7 @@ pub async fn execute_sidecar_scan(
         ),
         &cancel_flag,
     )
-    .await;
+    .await?;
 
     Ok(())
 }
@@ -876,6 +979,41 @@ mod page_data_tests {
         assert!(page.to_png().is_ok());
     }
 
+    /// 32 bpp sources exist (some flatbeds report RGBX), and JPEG has no
+    /// alpha channel. Rejecting them here aborted the whole scan in PDF mode,
+    /// which is the regression this pins: the alpha is dropped, not the page.
+    #[test]
+    fn to_jpeg_flattens_32bpp_rather_than_failing() {
+        let (width, height) = (8u32, 4u32);
+        let page = PageData {
+            page_number: 1,
+            width,
+            height,
+            bits_per_pixel: 32,
+            dpi_x: 300.0,
+            dpi_y: 300.0,
+            // 4-byte pixels are already DWORD-aligned; no row padding.
+            bytes_per_row: width * 4,
+            raw_data: (0..width * height)
+                .flat_map(|i| [i as u8, 0x20, 0x40, 0x00])
+                .collect(),
+        };
+
+        let jpeg = page
+            .to_jpeg(85)
+            .expect("a 32 bpp page must encode, not abort the scan");
+
+        // Decode it, so this asserts about a real image rather than about a
+        // non-empty buffer: a fully transparent source that was handed to the
+        // encoder as RGBA would not survive this.
+        let decoded = image::load_from_memory(&jpeg).expect("output must be a valid JPEG");
+        assert_eq!((decoded.width(), decoded.height()), (width, height));
+        assert!(
+            matches!(decoded, image::DynamicImage::ImageRgb8(_)),
+            "the alpha channel must be flattened away, got {decoded:?}"
+        );
+    }
+
     #[test]
     fn to_png_reports_error_rather_than_panicking_on_truncated_data() {
         let mut page = padded_24bpp_page(2550, 4, 7652);
@@ -928,6 +1066,121 @@ mod transfer_tests {
         assert!(
             matches!(result, Err(ScanError::Cancelled)),
             "expected Cancelled, got {result:?}"
+        );
+    }
+
+    /// The race this pins: the producer finished successfully, a page is
+    /// still queued, and the flag goes up before the consumer picks it up.
+    /// Ending the loop there would drop that page, let the producer join
+    /// `Ok`, and report the short document as `scan_complete` — a silently
+    /// truncated scan presented as a success. Cancelling has to fail.
+    #[tokio::test]
+    async fn a_cancel_with_a_page_still_queued_fails_the_scan() {
+        let (tx, _rx) = mpsc::channel::<OutgoingMessage>(RESPONSE_CHANNEL_CAPACITY);
+        let (page_tx, mut page_rx) = mpsc::channel::<PageData>(PAGE_CHANNEL_CAPACITY);
+
+        page_tx
+            .send(PageData {
+                page_number: 1,
+                width: 2,
+                height: 2,
+                bits_per_pixel: 24,
+                dpi_x: 300.0,
+                dpi_y: 300.0,
+                bytes_per_row: 8,
+                raw_data: vec![0x11; 16],
+            })
+            .await
+            .unwrap();
+        // The producer is done and succeeded; only the queued page is left.
+        drop(page_tx);
+
+        let cancel = AtomicBool::new(true);
+        let sink = PageSink {
+            response_tx: &tx,
+            request_id: "req-1",
+            scan_id: "scan-1",
+            cancel_flag: &cancel,
+        };
+
+        match consume_pages(&sink, OutputFormat::Png, &mut page_rx).await {
+            Err(ScanError::Cancelled) => {}
+            Err(other) => panic!("expected Cancelled, got {other}"),
+            Ok((pages, _)) => {
+                panic!("a cancelled scan reported success with {pages} page(s)")
+            }
+        }
+    }
+
+    /// The streamed read-back must announce the file's real length and
+    /// deliver exactly it. Announcing anything else strands the client, which
+    /// reads binary frames until `total_bytes` is reached and no further.
+    #[tokio::test]
+    async fn a_streamed_file_announces_its_real_length_and_delivers_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.pdf");
+        // Deliberately not a multiple of the chunk size: the last frame is
+        // where an off-by-one in the loop would show up.
+        let contents: Vec<u8> = (0..CHUNK_BYTES * 2 + 7).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &contents).unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<OutgoingMessage>(RESPONSE_CHANNEL_CAPACITY);
+        let reader = tokio::spawn(async move {
+            let mut announced = None;
+            let mut bytes = Vec::new();
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    OutgoingMessage::Json(m) => {
+                        if let AgentMessage::BinaryStart {
+                            kind,
+                            page,
+                            total_bytes,
+                            ..
+                        } = *m
+                        {
+                            announced = Some((kind, page, total_bytes));
+                        }
+                    }
+                    OutgoingMessage::Binary(chunk) => {
+                        assert!(chunk.len() <= CHUNK_BYTES, "frame exceeded the chunk size");
+                        bytes.extend_from_slice(&chunk);
+                    }
+                }
+            }
+            (announced, bytes)
+        });
+
+        let cancel = AtomicBool::new(false);
+        {
+            let sink = PageSink {
+                response_tx: &tx,
+                request_id: "req-1",
+                scan_id: "scan-1",
+                cancel_flag: &cancel,
+            };
+            let mut file = std::fs::File::open(&path).unwrap();
+            sink.transfer_file("pdf", "application/pdf", &mut file, contents.len())
+                .await
+                .expect("an unhindered file transfer must succeed");
+        }
+        drop(tx);
+
+        let (announced, bytes) = reader.await.unwrap();
+        assert_eq!(
+            announced,
+            Some(("pdf".to_string(), None, contents.len())),
+            "the announced length must match the file on disk"
+        );
+        // Length first: a mismatch here would otherwise print two multi-
+        // megabyte vectors before saying anything useful.
+        assert_eq!(
+            bytes.len(),
+            contents.len(),
+            "the streamed document was truncated or padded"
+        );
+        assert!(
+            bytes == contents,
+            "the streamed document lost or reordered bytes"
         );
     }
 
