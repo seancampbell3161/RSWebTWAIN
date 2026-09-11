@@ -44,7 +44,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 thiserror = "2"
 base64 = "0.22"
-libloading = "0.8"
+libloading = "0.9"
 tempfile = "3"
 
 [dev-dependencies]
