@@ -4,6 +4,11 @@ How a browser application connects to the RSWebTWAIN agent, what the
 WebSocket protocol looks like on the wire, and what security guarantees the
 connection does and does not provide.
 
+A complete working client lives at [`examples/test-client.html`](../examples/test-client.html) —
+a single dependency-free page implementing everything described below, including
+binary-transfer accumulation. Reading it alongside this guide is usually faster
+than reading the guide alone.
+
 ## Prerequisites
 
 - The agent is installed and running. It is a headless system tray

@@ -66,6 +66,21 @@ cargo test  -p scan-agent
 Integration tests in `src-tauri/tests/` spin up a real WebSocket server and a
 fake sidecar binary — no scanner hardware required.
 
+### Trying it against a scanner
+
+`examples/test-client.html` is a dependency-free harness that drives the agent
+end to end: list sources, set resolution and colour mode, scan, watch
+thumbnails arrive, and download the PDF. It also prints every protocol frame,
+which is usually the fastest way to see what a scanner actually did.
+
+Serve it over HTTP rather than opening the file directly — a `file://` page
+sends `Origin: null`, which the agent rejects:
+
+```bash
+cd examples && python -m http.server 8080
+# then open http://localhost:8080/test-client.html
+```
+
 ### Checking the Windows-only code from macOS or Linux
 
 Most of the TWAIN layer is behind `cfg(windows)`, so a normal `cargo check` on
