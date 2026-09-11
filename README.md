@@ -20,8 +20,10 @@ Browser app  ──WebSocket──▶  RSWebTWAIN (64-bit)  ──spawn──▶
 - When a scanner only ships a 32-bit driver, the main app spawns a 32-bit
   sidecar process and proxies commands over JSON-line stdin/stdout IPC.
 - The browser communicates with the agent over a local WebSocket on
-  `127.0.0.1:47115`. Origin validation and an optional auth token gate
-  connections.
+  `127.0.0.1:47115`. Origin validation is the primary gate on connections; a
+  shared token is available as an opt-in extra when a deployer controls
+  both the agent's config and the connecting page. See
+  [docs/integration.md](docs/integration.md).
 - A `rswebtwain://` deep link protocol allows web pages to launch the agent.
 
 The protocol lives in `src-tauri/src/protocol.rs`, the orchestrator in
@@ -73,11 +75,12 @@ edits required.
 
 ### When to edit the config file
 
-Edit `%APPDATA%\com.rswebtwain.agent\config.toml` when you need to:
+Edit `%APPDATA%\com.rswebtwain.app\config.toml` when you need to:
 
 - Allow a production frontend served from a real domain.
 - Lock down localhost (set `allow_localhost = false`).
 - Change the listening port.
+- Require a shared auth token (see [docs/integration.md](docs/integration.md)).
 
 The file is created automatically on first run with every setting commented out.
 After editing, restart the agent (right-click tray → Quit, then relaunch).
@@ -101,6 +104,7 @@ After editing, restart the agent (right-click tray → Quit, then relaunch).
 |--------------------------------|--------------------------------------------------------------------------------------------------------------------|----------------|
 | `RSWEBTWAIN_PORT`              | WebSocket listening port                                                                                           | `47115`        |
 | `RSWEBTWAIN_ALLOWED_ORIGINS`   | Comma-separated exact-match origins. **Replaces the entire policy** when set (sets `allow_localhost = false`)      | (config value) |
+| `RSWEBTWAIN_AUTH_TOKEN`        | Overrides `server.auth_token`. Empty values are ignored and logged as a warning                                    | (config value) |
 | `RUST_LOG`                     | Logging filter (e.g., `scan_agent=debug`)                                                                          | (off)          |
 
 To keep localhost in the policy via env, list it explicitly:
@@ -123,8 +127,13 @@ Issues and PRs welcome. Before opening a PR:
 - New behaviour should come with a test (the integration tests use a fake
   sidecar so you don't need real hardware)
 
-## Policies
+## Documentation
 
+- [Integration Guide](docs/integration.md) — how a browser page connects:
+  origins, the worked message exchange, error codes, the optional auth
+  token, and the security model.
+- [Configuration](docs/configuration.md) — the `config.toml` schema,
+  environment variable overrides, and log files.
 - [Code Signing Policy](docs/code-signing-policy.md) — what is signed, who
   signs it, and how to report concerns.
 - [Privacy Policy](docs/privacy.md) — what the agent does and does not do

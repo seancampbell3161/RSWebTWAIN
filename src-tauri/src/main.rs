@@ -15,92 +15,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use scan_agent_lib::protocol::AgentMessage;
-use scan_agent_lib::ws_server::{self, EventSender, WsServerConfig, DEFAULT_WS_PORT};
+use scan_agent_lib::ws_server::{self, EventSender, DEFAULT_WS_PORT};
 use tauri::Manager;
 use tauri::tray::TrayIconBuilder;
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 use tracing::{error, info, warn};
-
-/// Encrypt data using Windows DPAPI (current-user scope).
-#[cfg(windows)]
-fn dpapi_encrypt(plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
-    use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
-
-    let input = CRYPT_INTEGER_BLOB {
-        cbData: plaintext.len() as u32,
-        pbData: plaintext.as_ptr() as *mut u8,
-    };
-    let mut output = CRYPT_INTEGER_BLOB {
-        cbData: 0,
-        pbData: std::ptr::null_mut(),
-    };
-
-    unsafe {
-        CryptProtectData(
-            &input,
-            None,
-            None,
-            None,
-            None,
-            0,
-            &mut output,
-        )
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-        let encrypted = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
-        windows::Win32::Foundation::LocalFree(windows::Win32::Foundation::HLOCAL(
-            output.pbData as *mut std::ffi::c_void,
-        ));
-        Ok(encrypted)
-    }
-}
-
-/// Decrypt data using Windows DPAPI (current-user scope).
-#[cfg(windows)]
-#[allow(dead_code)]
-fn dpapi_decrypt(ciphertext: &[u8]) -> std::io::Result<Vec<u8>> {
-    use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
-
-    let input = CRYPT_INTEGER_BLOB {
-        cbData: ciphertext.len() as u32,
-        pbData: ciphertext.as_ptr() as *mut u8,
-    };
-    let mut output = CRYPT_INTEGER_BLOB {
-        cbData: 0,
-        pbData: std::ptr::null_mut(),
-    };
-
-    unsafe {
-        CryptUnprotectData(
-            &input,
-            None,
-            None,
-            None,
-            None,
-            0,
-            &mut output,
-        )
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-        let decrypted = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
-        windows::Win32::Foundation::LocalFree(windows::Win32::Foundation::HLOCAL(
-            output.pbData as *mut std::ffi::c_void,
-        ));
-        Ok(decrypted)
-    }
-}
-
-#[cfg(not(windows))]
-fn dpapi_encrypt(plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
-    Ok(plaintext.to_vec())
-}
-
-#[cfg(not(windows))]
-#[allow(dead_code)]
-fn dpapi_decrypt(ciphertext: &[u8]) -> std::io::Result<Vec<u8>> {
-    Ok(ciphertext.to_vec())
-}
 
 fn main() {
     // Resolve log dir under %APPDATA%. The Tauri app handle (which would give us
@@ -131,25 +51,19 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            // --- Auth Token ---
-            let auth_token = if cfg!(debug_assertions) {
-                None
-            } else {
-                let token = uuid::Uuid::new_v4().to_string();
-                let data_dir = app.path().app_data_dir()?;
-                std::fs::create_dir_all(&data_dir)?;
-                let token_path = data_dir.join("ws-token");
-                let encrypted = dpapi_encrypt(token.as_bytes())?;
-                std::fs::write(&token_path, &encrypted)?;
-                info!("Auth token written to {}", token_path.display());
-                Some(token)
-            };
-
-            let token_cleanup_path = if !cfg!(debug_assertions) {
-                app.path().app_data_dir().ok().map(|d| d.join("ws-token"))
-            } else {
-                None
-            };
+            // Older versions generated a per-launch token here and wrote it to
+            // a file no browser could read, which made release builds
+            // unreachable. Remove any leftover so it cannot confuse anyone
+            // inspecting the data directory.
+            if let Ok(data_dir) = app.path().app_data_dir() {
+                let stale_token = data_dir.join("ws-token");
+                if stale_token.exists() {
+                    match std::fs::remove_file(&stale_token) {
+                        Ok(()) => info!("Removed obsolete ws-token file"),
+                        Err(e) => warn!("Could not remove obsolete ws-token file: {e}"),
+                    }
+                }
+            }
 
             // --- System Tray ---
             let quit = tauri::menu::MenuItem::with_id(app, "quit", "Quit RSWebTWAIN", true, None::<&str>)?;
@@ -189,9 +103,6 @@ fn main() {
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "quit" => {
                         info!("Quit requested via tray menu");
-                        if let Some(ref path) = token_cleanup_path {
-                            let _ = std::fs::remove_file(path);
-                        }
                         app.exit(0);
                     }
                     "autostart" => {
@@ -294,13 +205,17 @@ fn main() {
                 info!("32-bit sidecar not found (32-bit-only scanners will be unavailable)");
             }
 
-            // --- WebSocket Server config (port + origin policy) ---
+            // --- WebSocket Server config (port + origin policy + auth token) ---
             use scan_agent_lib::config;
             use scan_agent_lib::ws_server::OriginPolicy;
 
-            let (port, origin_policy) = if cfg!(debug_assertions) {
+            let ws_config = if cfg!(debug_assertions) {
                 // Debug: skip the config file entirely; allow any origin.
-                (ws_server::DEFAULT_WS_PORT, OriginPolicy::AllowAll)
+                ws_server::WsServerConfig {
+                    port: ws_server::DEFAULT_WS_PORT,
+                    origin_policy: OriginPolicy::AllowAll,
+                    auth_token: None,
+                }
             } else {
                 let config_path = app
                     .path()
@@ -338,22 +253,18 @@ fn main() {
                     );
                 }
 
-                let policy = OriginPolicy::Restricted {
-                    allow_localhost: cfg.server.allow_localhost,
-                    extra: cfg.server.extra_origins,
-                };
-                (cfg.server.port, policy)
+                if cfg.server.auth_token.is_some() {
+                    info!("Auth token configured; clients must connect with ?token=<value>");
+                }
+
+                (&cfg).into()
             };
+
+            let port = ws_config.port;
 
             let _app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let config = WsServerConfig {
-                    port,
-                    origin_policy,
-                    auth_token,
-                };
-
-                match ws_server::start_server(config).await {
+                match ws_server::start_server(ws_config).await {
                     Ok(handle) => {
                         info!("WebSocket server started on port {}", port);
 

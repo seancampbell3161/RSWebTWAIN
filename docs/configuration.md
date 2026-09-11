@@ -1,6 +1,6 @@
 # RSWebTWAIN Agent Configuration
 
-The agent reads an optional TOML config file at `%APPDATA%\com.rswebtwain.agent\config.toml`.
+The agent reads an optional TOML config file at `%APPDATA%\com.rswebtwain.app\config.toml`.
 With no file, it runs with built-in defaults (port 47115, localhost-only origins).
 
 ## Schema
@@ -16,6 +16,11 @@ allow_localhost = true
 # Additional exact-match origins (production frontends).
 # Each entry must be a full origin including scheme: http://... or https://...
 extra_origins = ["https://app.example.com"]
+
+# Optional shared secret. When set, clients must connect with
+# ?token=<value>. Unset by default — origin validation above is the
+# primary defence; see docs/integration.md for when a token is worth adding.
+# auth_token = "change-me"
 ```
 
 All fields are optional. Missing fields use the built-in defaults shown above.
@@ -48,12 +53,26 @@ extra_origins = ["https://app.example.com"]
 
 The agent will reject every connection that doesn't match `extra_origins`.
 
+### 4. Requiring a shared token
+
+```toml
+[server]
+auth_token = "change-me"
+```
+
+Origin validation still applies; the token is an additional check on top of
+it, not a replacement. Clients must connect with `?token=change-me` in the
+WebSocket URL. Only set this if you control both the config file and the
+page that connects — see [integration.md](integration.md#optional-shared-token)
+for why.
+
 ## Environment variable overrides
 
 | Variable                       | Effect                                                                                                            |
 |--------------------------------|-------------------------------------------------------------------------------------------------------------------|
 | `RSWEBTWAIN_PORT`              | Overrides `server.port`. Invalid values keep the config value and log a warning.                                  |
 | `RSWEBTWAIN_ALLOWED_ORIGINS`   | **Replaces the entire origin policy**: sets `allow_localhost = false` and uses the comma-separated list as `extra_origins`. To keep localhost, list it explicitly. |
+| `RSWEBTWAIN_AUTH_TOKEN`        | Overrides `server.auth_token`. An empty value is ignored (logged as a warning) rather than disabling the token.    |
 
 ## Troubleshooting
 
@@ -75,7 +94,7 @@ a one-line note that the template was written.
 
 ### Regenerating the template
 
-Delete `%APPDATA%\com.rswebtwain.agent\config.toml` and relaunch the agent.
+Delete `%APPDATA%\com.rswebtwain.app\config.toml` and relaunch the agent.
 The next startup writes a fresh commented template.
 
 ## Log files

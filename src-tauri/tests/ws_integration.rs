@@ -826,3 +826,87 @@ async fn sidecar_pages_with_padded_rows_reach_the_client() {
 
     handler.abort();
 }
+
+/// A browser connecting to a release-shaped agent, with a valid Origin and no
+/// token, must be served. This is the configuration the MSI ships, and it
+/// rejected every connection until the token was made opt-in.
+#[tokio::test]
+async fn default_config_accepts_a_browser_connection_without_a_token() {
+    let agent_config = scan_agent_lib::config::AgentConfig::default();
+    let config: WsServerConfig = (&agent_config).into();
+
+    assert!(
+        config.auth_token.is_none(),
+        "a default config must not demand a token"
+    );
+
+    let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
+    let event_tx = handle.event_tx.clone();
+    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
+
+    // No ?token= in the URL, and an Origin a browser would really send.
+    let request = ws_request_with_origin(port, "http://localhost:4200");
+    let (ws_stream, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("a default install must accept a localhost browser origin");
+    let (mut tx, mut rx) = ws_stream.split();
+
+    tx.send(Message::Text(r#"{"type":"ping","id":"no-token"}"#.into()))
+        .await
+        .unwrap();
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), rx.next())
+        .await
+        .expect("Timeout waiting for pong")
+        .expect("Stream ended")
+        .expect("WS error");
+    let v: serde_json::Value = serde_json::from_str(&response.into_text().unwrap()).unwrap();
+    assert_eq!(v["type"], "pong");
+    assert_eq!(v["id"], "no-token");
+
+    handler.abort();
+}
+
+/// A page that sends a token to an agent with none configured must still be
+/// served — an extra query parameter is not an error.
+#[tokio::test]
+async fn unexpected_token_is_ignored_when_none_is_configured() {
+    let agent_config = scan_agent_lib::config::AgentConfig::default();
+    let config: WsServerConfig = (&agent_config).into();
+
+    let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
+    let event_tx = handle.event_tx.clone();
+    let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
+
+    let request = tungstenite::http::Request::builder()
+        .uri(format!("ws://127.0.0.1:{}/?token=unnecessary", port))
+        .header("Host", format!("127.0.0.1:{}", port))
+        .header("Origin", "http://localhost:4200")
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", tungstenite::handshake::client::generate_key())
+        .body(())
+        .unwrap();
+
+    let (ws_stream, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("an unexpected token must not be rejected");
+    let (mut tx, mut rx) = ws_stream.split();
+
+    tx.send(Message::Text(r#"{"type":"ping","id":"extra-token"}"#.into()))
+        .await
+        .unwrap();
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), rx.next())
+        .await
+        .expect("Timeout waiting for pong")
+        .expect("Stream ended")
+        .expect("WS error");
+    let v: serde_json::Value = serde_json::from_str(&response.into_text().unwrap()).unwrap();
+    assert_eq!(v["type"], "pong");
+
+    handler.abort();
+}
