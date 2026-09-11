@@ -269,6 +269,127 @@ impl ScanOrchestrator {
 
 // Scan Execution (standalone, does not hold orchestrator lock)
 
+/// Consume scanned pages, emit progress and page messages, and assemble a PDF
+/// when one was requested.
+///
+/// Shared by the native and sidecar scan paths, which differ only in how pages
+/// are produced. Returns the page count and, for PDF output, the base64 document.
+async fn consume_pages(
+    request_id: &str,
+    scan_id: &str,
+    format: OutputFormat,
+    page_rx: &mut mpsc::Receiver<PageData>,
+    response_tx: &ResponseSender,
+    cancel_flag: &AtomicBool,
+) -> Result<(u32, Option<String>), ScanError> {
+    let mut page_count = 0u32;
+    let mut all_pages: Vec<Vec<u8>> = Vec::new();
+
+    while let Some(page_data) = page_rx.recv().await {
+        if cancel_flag.load(Ordering::Acquire) {
+            info!("Page processing cancelled for scan {}", scan_id);
+            page_rx.close();
+            while page_rx.try_recv().is_ok() {}
+            break;
+        }
+
+        page_count += 1;
+
+        send_json(
+            response_tx,
+            AgentMessage::ScanProgress {
+                id: request_id.to_string(),
+                scan_id: scan_id.to_string(),
+                page: page_count,
+                status: ScanStatus::Scanning,
+            },
+        )
+        .await;
+
+        match format {
+            OutputFormat::Png => {
+                let png_data = page_data.to_png()?;
+                let encoded =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png_data);
+                send_json(
+                    response_tx,
+                    AgentMessage::ScanPage {
+                        id: request_id.to_string(),
+                        scan_id: scan_id.to_string(),
+                        page: page_count,
+                        data: encoded,
+                        mime: "image/png".to_string(),
+                    },
+                )
+                .await;
+            }
+            OutputFormat::Jpeg => {
+                let jpeg_data = page_data.to_jpeg(85)?;
+                let encoded =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &jpeg_data);
+                send_json(
+                    response_tx,
+                    AgentMessage::ScanPage {
+                        id: request_id.to_string(),
+                        scan_id: scan_id.to_string(),
+                        page: page_count,
+                        data: encoded,
+                        mime: "image/jpeg".to_string(),
+                    },
+                )
+                .await;
+            }
+            OutputFormat::Pdf => {
+                let png_data = page_data.to_png()?;
+                all_pages.push(png_data);
+
+                let preview = page_data.to_jpeg(60)?;
+                let encoded =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &preview);
+                send_json(
+                    response_tx,
+                    AgentMessage::ScanPage {
+                        id: request_id.to_string(),
+                        scan_id: scan_id.to_string(),
+                        page: page_count,
+                        data: encoded,
+                        mime: "image/jpeg".to_string(),
+                    },
+                )
+                .await;
+            }
+        }
+    }
+
+    let pdf_data = if matches!(format, OutputFormat::Pdf) && !all_pages.is_empty() {
+        send_json(
+            response_tx,
+            AgentMessage::ScanProgress {
+                id: request_id.to_string(),
+                scan_id: scan_id.to_string(),
+                page: page_count,
+                status: ScanStatus::Processing,
+            },
+        )
+        .await;
+
+        match crate::pdf::generate_pdf(&all_pages) {
+            Ok(pdf_bytes) => Some(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &pdf_bytes,
+            )),
+            Err(e) => {
+                error!("PDF generation failed: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok((page_count, pdf_data))
+}
+
 /// Execute a native TWAIN scan and stream results back via the provided sender.
 ///
 /// This function does NOT hold any mutex during the scan. The caller is responsible
@@ -369,88 +490,15 @@ pub async fn execute_native_scan(
         Ok(())
     });
 
-    // Process pages as they arrive from the scan thread
-    let mut page_count = 0u32;
-    let mut all_pages: Vec<Vec<u8>> = Vec::new();
-
-    while let Some(page_data) = page_rx.recv().await {
-        // Check for cancellation before processing
-        if cancel_flag.load(Ordering::Acquire) {
-            info!("Page processing cancelled for scan {}", scan_id);
-            // Drain buffered pages to free memory and unblock scan thread
-            page_rx.close();
-            while page_rx.try_recv().is_ok() {}
-            break;
-        }
-
-        page_count += 1;
-
-        // Send progress
-        send_json(&response_tx, AgentMessage::ScanProgress {
-            id: request_id.clone(),
-            scan_id: scan_id.clone(),
-            page: page_count,
-            status: ScanStatus::Scanning,
-        })
-        .await;
-
-        // Convert page based on requested format
-        match format {
-            OutputFormat::Png => {
-                let png_data = page_data.to_png()?;
-                let encoded = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &png_data,
-                );
-
-                send_json(&response_tx, AgentMessage::ScanPage {
-                    id: request_id.clone(),
-                    scan_id: scan_id.clone(),
-                    page: page_count,
-                    data: encoded,
-                    mime: "image/png".to_string(),
-                })
-                .await;
-            }
-            OutputFormat::Jpeg => {
-                let jpeg_data = page_data.to_jpeg(85)?;
-                let encoded = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &jpeg_data,
-                );
-
-                send_json(&response_tx, AgentMessage::ScanPage {
-                    id: request_id.clone(),
-                    scan_id: scan_id.clone(),
-                    page: page_count,
-                    data: encoded,
-                    mime: "image/jpeg".to_string(),
-                })
-                .await;
-            }
-            OutputFormat::Pdf => {
-                // Collect pages for PDF generation at the end
-                let png_data = page_data.to_png()?;
-                all_pages.push(png_data);
-
-                // Still send individual page previews
-                let preview = page_data.to_jpeg(60)?;
-                let encoded = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &preview,
-                );
-
-                send_json(&response_tx, AgentMessage::ScanPage {
-                    id: request_id.clone(),
-                    scan_id: scan_id.clone(),
-                    page: page_count,
-                    data: encoded,
-                    mime: "image/jpeg".to_string(),
-                })
-                .await;
-            }
-        }
-    }
+    let (page_count, pdf_data) = consume_pages(
+        &request_id,
+        &scan_id,
+        format,
+        &mut page_rx,
+        &response_tx,
+        &cancel_flag,
+    )
+    .await?;
 
     // Wait for scan thread to complete
     match scan_thread.join() {
@@ -465,37 +513,15 @@ pub async fn execute_native_scan(
         }
     }
 
-    // Generate PDF if requested
-    let pdf_data = if matches!(format, OutputFormat::Pdf) && !all_pages.is_empty() {
-        send_json(&response_tx, AgentMessage::ScanProgress {
-            id: request_id.clone(),
-            scan_id: scan_id.clone(),
-            page: page_count,
-            status: ScanStatus::Processing,
-        })
-        .await;
-
-        match crate::pdf::generate_pdf(&all_pages) {
-            Ok(pdf_bytes) => Some(base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                &pdf_bytes,
-            )),
-            Err(e) => {
-                error!("PDF generation failed: {}", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // Send completion
-    send_json(&response_tx, AgentMessage::ScanComplete {
-        id: request_id,
-        scan_id,
-        total_pages: page_count,
-        pdf_data,
-    })
+    send_json(
+        &response_tx,
+        AgentMessage::ScanComplete {
+            id: request_id,
+            scan_id,
+            total_pages: page_count,
+            pdf_data,
+        },
+    )
     .await;
 
     Ok(())
@@ -618,79 +644,15 @@ pub async fn execute_sidecar_scan(
         Ok(())
     });
 
-    // Process pages as they arrive (same pipeline as execute_native_scan)
-    let mut page_count = 0u32;
-    let mut all_pages: Vec<Vec<u8>> = Vec::new();
-
-    while let Some(page_data) = page_rx.recv().await {
-        if cancel_flag.load(Ordering::Acquire) {
-            info!("Page processing cancelled for sidecar scan {}", scan_id);
-            page_rx.close();
-            while page_rx.try_recv().is_ok() {}
-            break;
-        }
-
-        page_count += 1;
-
-        send_json(&response_tx, AgentMessage::ScanProgress {
-            id: request_id.clone(),
-            scan_id: scan_id.clone(),
-            page: page_count,
-            status: ScanStatus::Scanning,
-        })
-        .await;
-
-        match format {
-            OutputFormat::Png => {
-                let png_data = page_data.to_png()?;
-                let encoded = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &png_data,
-                );
-                send_json(&response_tx, AgentMessage::ScanPage {
-                    id: request_id.clone(),
-                    scan_id: scan_id.clone(),
-                    page: page_count,
-                    data: encoded,
-                    mime: "image/png".to_string(),
-                })
-                .await;
-            }
-            OutputFormat::Jpeg => {
-                let jpeg_data = page_data.to_jpeg(85)?;
-                let encoded = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &jpeg_data,
-                );
-                send_json(&response_tx, AgentMessage::ScanPage {
-                    id: request_id.clone(),
-                    scan_id: scan_id.clone(),
-                    page: page_count,
-                    data: encoded,
-                    mime: "image/jpeg".to_string(),
-                })
-                .await;
-            }
-            OutputFormat::Pdf => {
-                let png_data = page_data.to_png()?;
-                all_pages.push(png_data);
-
-                let preview = page_data.to_jpeg(60)?;
-                let encoded = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &preview,
-                );
-                send_json(&response_tx, AgentMessage::ScanPage {
-                    id: request_id.clone(),
-                    scan_id: scan_id.clone(),
-                    page: page_count,
-                    data: encoded,
-                    mime: "image/jpeg".to_string(),
-                })
-                .await;
-            }
-        }
-    }
+    let (page_count, pdf_data) = consume_pages(
+        &request_id,
+        &scan_id,
+        format,
+        &mut page_rx,
+        &response_tx,
+        &cancel_flag,
+    )
+    .await?;
 
     // Wait for sidecar task to complete
     match sidecar_task.await {
@@ -705,36 +667,15 @@ pub async fn execute_sidecar_scan(
         }
     }
 
-    // Generate PDF if requested
-    let pdf_data = if matches!(format, OutputFormat::Pdf) && !all_pages.is_empty() {
-        send_json(&response_tx, AgentMessage::ScanProgress {
-            id: request_id.clone(),
-            scan_id: scan_id.clone(),
-            page: page_count,
-            status: ScanStatus::Processing,
-        })
-        .await;
-
-        match crate::pdf::generate_pdf(&all_pages) {
-            Ok(pdf_bytes) => Some(base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                &pdf_bytes,
-            )),
-            Err(e) => {
-                error!("PDF generation failed: {}", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    send_json(&response_tx, AgentMessage::ScanComplete {
-        id: request_id,
-        scan_id,
-        total_pages: page_count,
-        pdf_data,
-    })
+    send_json(
+        &response_tx,
+        AgentMessage::ScanComplete {
+            id: request_id,
+            scan_id,
+            total_pages: page_count,
+            pdf_data,
+        },
+    )
     .await;
 
     Ok(())
