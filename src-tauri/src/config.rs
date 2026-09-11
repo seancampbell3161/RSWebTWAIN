@@ -72,6 +72,23 @@ impl Default for ServerConfig {
     }
 }
 
+/// Build the WebSocket server configuration a loaded config implies.
+///
+/// This always produces `Restricted`; `AllowAll` is a debug-build decision
+/// made in `main.rs`, not something a config file can ask for.
+impl From<&AgentConfig> for crate::ws_server::WsServerConfig {
+    fn from(cfg: &AgentConfig) -> Self {
+        Self {
+            port: cfg.server.port,
+            origin_policy: crate::ws_server::OriginPolicy::Restricted {
+                allow_localhost: cfg.server.allow_localhost,
+                extra: cfg.server.extra_origins.clone(),
+            },
+            auth_token: cfg.server.auth_token.clone(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ConfigError {
     Io(std::io::Error),
@@ -509,5 +526,65 @@ mod tests {
                 "an empty env value must not silently disable a configured token"
             );
         });
+    }
+
+    #[test]
+    fn release_config_requires_no_token_by_default() {
+        // The shipped defect: release builds demanded a token no browser could
+        // obtain. A default config must map to no token at all.
+        let cfg = AgentConfig::default();
+        let ws: crate::ws_server::WsServerConfig = (&cfg).into();
+        assert!(
+            ws.auth_token.is_none(),
+            "a default config must not require a token"
+        );
+    }
+
+    #[test]
+    fn config_maps_to_restricted_localhost_policy() {
+        let cfg = AgentConfig::default();
+        let ws: crate::ws_server::WsServerConfig = (&cfg).into();
+        match ws.origin_policy {
+            crate::ws_server::OriginPolicy::Restricted {
+                allow_localhost,
+                ref extra,
+            } => {
+                assert!(allow_localhost);
+                assert!(extra.is_empty());
+            }
+            other => panic!("expected Restricted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configured_token_reaches_the_server_config() {
+        let cfg = parse("[server]\nauth_token = \"s3cret\"\n");
+        let ws: crate::ws_server::WsServerConfig = (&cfg).into();
+        assert_eq!(ws.auth_token.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn configured_origins_reach_the_server_config() {
+        let cfg = parse(
+            "[server]\nallow_localhost = false\nextra_origins = [\"https://app.example.com\"]\n",
+        );
+        let ws: crate::ws_server::WsServerConfig = (&cfg).into();
+        match ws.origin_policy {
+            crate::ws_server::OriginPolicy::Restricted {
+                allow_localhost,
+                ref extra,
+            } => {
+                assert!(!allow_localhost);
+                assert_eq!(extra, &["https://app.example.com".to_string()]);
+            }
+            other => panic!("expected Restricted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_port_reaches_the_server_config() {
+        let cfg = parse("[server]\nport = 50000\n");
+        let ws: crate::ws_server::WsServerConfig = (&cfg).into();
+        assert_eq!(ws.port, 50000);
     }
 }
