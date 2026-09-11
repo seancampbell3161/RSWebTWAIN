@@ -112,11 +112,14 @@ To keep localhost in the policy via env, list it explicitly:
 
 ## Protocol
 
-All WebSocket frames are JSON with a correlation `id`. Client → agent:
-`ping`, `list_scanners`, `start_scan`, `cancel_scan`. Agent → client:
-`pong`, `scanner_list`, `scan_progress`, `scan_page`, `scan_complete`,
-`error`, `server_shutdown`, `deep_link`. Full enums in
-`src-tauri/src/protocol.rs`.
+Client → agent messages are JSON with a correlation `id`: `ping`,
+`list_scanners`, `start_scan`, `cancel_scan`. Agent → client: `pong`,
+`scanner_list`, `scan_progress`, `binary_start`, `scan_complete`, `error`,
+`server_shutdown`, `deep_link` — also JSON, except that `binary_start`
+announces page images and the finished PDF, which follow as binary
+WebSocket frames rather than being inlined in JSON. Full enums in
+`src-tauri/src/protocol.rs`; the accumulation rule is in
+[docs/integration.md](docs/integration.md).
 
 ## Contributing
 
