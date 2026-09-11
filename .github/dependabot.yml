@@ -1,0 +1,33 @@
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # The Tauri stack pulls a large transitive tree; without grouping this
+    # would open a PR per crate every week and get muted within a month.
+    groups:
+      tauri:
+        patterns:
+          - "tauri"
+          - "tauri-*"
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    # Major bumps of these need hand-holding rather than an automatic PR:
+    # `windows` must match the version the Tauri stack resolves to, or the
+    # duplicate binding crate comes back, and tokio-tungstenite's Message
+    # types changed shape after 0.24.
+    ignore:
+      - dependency-name: "windows"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "tokio-tungstenite"
+        update-types: ["version-update:semver-minor"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly

@@ -1043,9 +1043,9 @@ fn create_message_window() -> Result<isize, String> {
             0,
             0,
             0,
-            HWND_MESSAGE,
+            Some(HWND_MESSAGE),
             None,
-            hinstance,
+            Some(hinstance),
             None,
         )
         .map_err(|e| e.to_string())?;
