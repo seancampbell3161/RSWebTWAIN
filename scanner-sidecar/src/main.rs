@@ -483,6 +483,9 @@ fn handle_scan(
     set_capability_u16(&mut app_id, &mut source_id, entry, ICAP_COMPRESSION, TWCP_NONE);
     // Pin pixel flavour so a 0 bit is unambiguously black.
     set_capability_u16(&mut app_id, &mut source_id, entry, ICAP_PIXELFLAVOR, TWPF_CHOCOLATE);
+    // The leftmost pixel is the byte's most significant bit, matching how the
+    // parent unpacks 1bpp data. Keep this block in step with twain.rs.
+    set_capability_u16(&mut app_id, &mut source_id, entry, ICAP_BITORDER, TWBO_MSBFIRST);
 
     if use_adf {
         set_capability_bool(&mut app_id, &mut source_id, entry, CAP_FEEDERENABLED, true);
