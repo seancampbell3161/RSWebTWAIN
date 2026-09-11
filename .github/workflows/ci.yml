@@ -42,6 +42,29 @@ jobs:
       - name: Clippy
         run: cargo clippy -p scan-agent -p scanner-sidecar -- -D warnings
 
+  audit:
+    # cargo-audit only reads Cargo.lock, so this is platform-independent and
+    # runs on Linux to keep it off the slower Windows runners.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # Default mode: fails on vulnerabilities, reports unmaintained/unsound
+      # crates as warnings without failing. The dependency tree currently
+      # carries several such warnings from the Tauri and GTK stacks that we
+      # cannot act on, so `--deny warnings` would fail every run and this
+      # check would be switched off within a week.
+      - name: Audit dependencies
+        run: cargo audit
+
   test:
     runs-on: windows-latest
     steps:

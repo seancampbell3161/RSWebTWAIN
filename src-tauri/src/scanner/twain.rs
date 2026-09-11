@@ -1230,9 +1230,9 @@ pub fn create_hidden_hwnd() -> TwainResult<isize> {
             w!("RSWebTWAIN TWAIN Window"),
             WS_OVERLAPPED,
             0, 0, 0, 0,
-            HWND_MESSAGE,
+            Some(HWND_MESSAGE),
             None,
-            hinstance,
+            Some(hinstance),
             None,
         )
         .map_err(|e| TwainError::WindowCreationFailed(e.to_string()))?;

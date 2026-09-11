@@ -66,6 +66,40 @@ cargo test  -p scan-agent
 Integration tests in `src-tauri/tests/` spin up a real WebSocket server and a
 fake sidecar binary — no scanner hardware required.
 
+### Checking the Windows-only code from macOS or Linux
+
+Most of the TWAIN layer is behind `cfg(windows)`, so a normal `cargo check` on
+a non-Windows host skips it entirely and a broken Win32 binding only shows up
+in CI. Cross-target checking catches it locally:
+
+```bash
+rustup target add x86_64-pc-windows-msvc i686-pc-windows-msvc
+
+cargo clippy --target x86_64-pc-windows-msvc \
+  -p scan-agent -p scanner-sidecar -- -D warnings
+
+cargo check --target i686-pc-windows-msvc -p scanner-sidecar
+```
+
+This type-checks without linking, so no MSVC toolchain is needed. The main app
+additionally needs `llvm-rc` on `PATH` — `tauri-winres` invokes it to compile
+the Windows resource file. On macOS it comes with Homebrew's LLVM:
+
+```bash
+export PATH="$(brew --prefix llvm)/bin:$PATH"
+```
+
+The first command is the exact gate CI enforces, so running it before pushing
+turns a CI round trip into a few seconds.
+
+### Dependencies
+
+`Cargo.lock` is committed. This workspace ships binaries and an installer, so
+builds need to be reproducible, and `cargo audit` in CI should see the
+resolution that was actually tested. Dependabot proposes updates weekly;
+`windows` is pinned to the version the Tauri stack resolves to, because
+diverging from it pulls a second copy of the Win32 bindings into the binary.
+
 ## Configuration
 
 The agent ships **safe-by-default**: with no configuration, it accepts WebSocket
