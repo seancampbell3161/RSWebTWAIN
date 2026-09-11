@@ -18,17 +18,30 @@ fn main() {
     std::fs::create_dir_all(&out_dir).unwrap();
 
     let pages = vec![
-        make_page(612, 792, "Page 1 — Letter size", [240, 240, 255]),
-        make_page(612, 792, "Page 2 — Letter size", [255, 240, 230]),
-        make_page(595, 842, "Page 3 — A4 size", [230, 255, 230]),
+        (612, 792, make_page(612, 792, "Page 1 — Letter size", [240, 240, 255])),
+        (612, 792, make_page(612, 792, "Page 2 — Letter size", [255, 240, 230])),
+        (595, 842, make_page(595, 842, "Page 3 — A4 size", [230, 255, 230])),
     ];
 
-    let pdf_bytes = scan_agent_lib::pdf::generate_pdf(&pages).expect("PDF generation failed");
-
+    // The writer appends each page to the file as it goes, the same way a
+    // real scan does; at 72 dpi a page measures its pixel count in points.
     let out_path = out_dir.join("test-scan.pdf");
-    std::fs::write(&out_path, &pdf_bytes).unwrap();
+    let mut writer = scan_agent_lib::pdf::PdfWriter::create(&out_path).expect("create PDF");
+    for (width, height, jpeg) in &pages {
+        writer
+            .add_page(scan_agent_lib::pdf::PageSpec {
+                jpeg,
+                width_px: *width,
+                height_px: *height,
+                dpi_x: 72.0,
+                dpi_y: 72.0,
+                channels: 3,
+            })
+            .expect("add page");
+    }
+    let written = writer.finish().expect("PDF generation failed");
 
-    println!("Wrote {} bytes to {}", pdf_bytes.len(), out_path.display());
+    println!("Wrote {} bytes to {}", written, out_path.display());
     println!("Open it in a PDF viewer to verify the output.");
 }
 
@@ -85,10 +98,9 @@ fn make_page(width: u32, height: u32, label: &str, bg: [u8; 3]) -> Vec<u8> {
         line_num += 1;
     }
 
-    // Encode as PNG
+    // Encode as JPEG — the format the PDF writer embeds directly.
     let mut buf = Vec::new();
-    let cursor = Cursor::new(&mut buf);
-    let encoder = image::codecs::png::PngEncoder::new(cursor);
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(Cursor::new(&mut buf), 85);
     encoder
         .write_image(&pixels, width, height, image::ExtendedColorType::Rgb8)
         .unwrap();

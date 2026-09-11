@@ -21,6 +21,7 @@ use tracing::{error, info, warn};
 
 use protocol::{AgentMessage, ClientMessage, ErrorCode, ScanStatus};
 use scanner::ScanOrchestrator;
+use ws_server::send_json;
 use ws_server::ResponseSender;
 
 /// Tracks state of the currently active scan (if any).
@@ -111,7 +112,7 @@ async fn handle_command(
 ) {
     match message {
         ClientMessage::Ping { id } => {
-            let _ = response_tx.send(AgentMessage::Pong { id });
+            send_json(&response_tx, AgentMessage::Pong { id }).await;
         }
 
         ClientMessage::ListScanners { id } => {
@@ -137,34 +138,38 @@ async fn handle_command(
                         })
                         .collect();
 
-                    let _ = response_tx.send(AgentMessage::ScannerList {
+                    send_json(&response_tx, AgentMessage::ScannerList {
                         id,
                         scanners: entries,
-                    });
+                    })
+                    .await;
                 }
                 Ok(Ok(Err(e))) => {
                     error!("Failed to list scanners: {}", e);
-                    let _ = response_tx.send(AgentMessage::Error {
+                    send_json(&response_tx, AgentMessage::Error {
                         id,
                         code: error_to_code(&e),
                         message: e.to_string(),
-                    });
+                    })
+                    .await;
                 }
                 Ok(Err(join_err)) => {
                     error!("Scanner discovery task panicked: {}", join_err);
-                    let _ = response_tx.send(AgentMessage::Error {
+                    send_json(&response_tx, AgentMessage::Error {
                         id,
                         code: ErrorCode::InternalError,
                         message: "Scanner discovery task failed".to_string(),
-                    });
+                    })
+                    .await;
                 }
                 Err(_) => {
                     warn!("Scanner discovery timed out after 15s");
-                    let _ = response_tx.send(AgentMessage::Error {
+                    send_json(&response_tx, AgentMessage::Error {
                         id,
                         code: ErrorCode::DiscoveryTimeout,
                         message: "Scanner discovery timed out".to_string(),
-                    });
+                    })
+                    .await;
                 }
             }
         }
@@ -176,11 +181,12 @@ async fn handle_command(
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_err()
             {
-                let _ = response_tx.send(AgentMessage::Error {
+                send_json(&response_tx, AgentMessage::Error {
                     id,
                     code: ErrorCode::ScannerBusy,
                     message: "A scan is already in progress".to_string(),
-                });
+                })
+                .await;
                 return;
             }
 
@@ -247,11 +253,12 @@ async fn handle_command(
                 }
                 Err(e) => {
                     error!("Scan {} failed: {}", scan_id, e);
-                    let _ = response_tx.send(AgentMessage::Error {
+                    send_json(&response_tx, AgentMessage::Error {
                         id,
                         code: error_to_code(&e),
                         message: e.to_string(),
-                    });
+                    })
+                    .await;
                 }
             }
 
@@ -259,26 +266,36 @@ async fn handle_command(
         }
 
         ClientMessage::CancelScan { id, scan_id } => {
-            let active = state.active_scan.lock().unwrap();
-            match &*active {
-                Some(active_scan) if active_scan.scan_id == scan_id => {
-                    info!("Cancelling scan {}", scan_id);
-                    active_scan.cancel_flag.store(true, Ordering::Release);
-                    let _ = response_tx.send(AgentMessage::ScanProgress {
-                        id,
-                        scan_id,
-                        page: 0,
-                        status: ScanStatus::Complete,
-                    });
+            // The lock must not be held across the `.await` below (the guard
+            // is not `Send`), so resolve the match and drop it first.
+            let found = {
+                let active = state.active_scan.lock().unwrap();
+                match &*active {
+                    Some(active_scan) if active_scan.scan_id == scan_id => {
+                        active_scan.cancel_flag.store(true, Ordering::Release);
+                        true
+                    }
+                    _ => false,
                 }
-                _ => {
-                    warn!("Cancel requested for unknown scan: {}", scan_id);
-                    let _ = response_tx.send(AgentMessage::Error {
-                        id,
-                        code: ErrorCode::InvalidRequest,
-                        message: format!("No active scan with id: {}", scan_id),
-                    });
-                }
+            };
+
+            if found {
+                info!("Cancelling scan {}", scan_id);
+                send_json(&response_tx, AgentMessage::ScanProgress {
+                    id,
+                    scan_id,
+                    page: 0,
+                    status: ScanStatus::Complete,
+                })
+                .await;
+            } else {
+                warn!("Cancel requested for unknown scan: {}", scan_id);
+                send_json(&response_tx, AgentMessage::Error {
+                    id,
+                    code: ErrorCode::InvalidRequest,
+                    message: format!("No active scan with id: {}", scan_id),
+                })
+                .await;
             }
         }
     }

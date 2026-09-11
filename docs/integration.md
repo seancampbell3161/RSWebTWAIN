@@ -84,9 +84,11 @@ configured to avoid.
 ## A worked exchange
 
 Every request carries a correlation `id`, and every response to it echoes
-that same `id` back — including each `scan_progress` / `scan_page`
+that same `id` back — including each `scan_progress` / `binary_start`
 event during a scan, which all echo the `id` of the `start_scan` that
-started them (not a new one per event).
+started them (not a new one per event). The binary frames that follow a
+`binary_start` carry no `id` of their own — see
+[Receiving binary transfers](#receiving-binary-transfers) below.
 
 ```jsonc
 // → agent
@@ -106,13 +108,19 @@ started them (not a new one per event).
   "show_scanner_ui":false
 }}
 
-// ← agent, repeating per page
+// ← agent, per page
 {"type":"scan_progress","id":"req-2","scan_id":"a1b2","page":1,"status":"scanning"}
-{"type":"scan_page","id":"req-2","scan_id":"a1b2","page":1,
- "data":"<base64>","mime":"image/jpeg"}
-// ← agent, once. pdf_data is present only when format is "pdf".
-{"type":"scan_complete","id":"req-2","scan_id":"a1b2","total_pages":1,
- "pdf_data":"<base64>"}
+{"type":"binary_start","id":"req-2","scan_id":"a1b2","kind":"thumbnail",
+ "page":1,"mime":"image/jpeg","total_bytes":20481}
+// → then binary WebSocket frames totalling 20481 bytes
+
+// ← agent, once the batch is done (PDF output only)
+{"type":"scan_progress","id":"req-2","scan_id":"a1b2","page":60,"status":"processing"}
+{"type":"binary_start","id":"req-2","scan_id":"a1b2","kind":"pdf",
+ "mime":"application/pdf","total_bytes":4194304}
+// → then binary frames totalling 4194304 bytes
+
+{"type":"scan_complete","id":"req-2","scan_id":"a1b2","total_pages":60}
 
 // → agent, to stop an in-flight scan
 {"type":"cancel_scan","id":"req-3","scan_id":"a1b2"}
@@ -127,12 +135,15 @@ the human-readable name (as shown above) works.
 
 Three behaviours worth knowing before you write a client against this:
 
-- **A `"pdf"` format still streams JPEG previews.** Every `scan_page` during
-  a PDF scan carries a JPEG preview of that page (`mime: "image/jpeg"`), not
-  the PDF. The PDF itself is assembled once all pages are in and arrives as
-  `pdf_data` on the single `scan_complete` message. If PDF assembly fails,
-  `scan_complete` still arrives with the correct `total_pages` but no
-  `pdf_data` field at all — it's omitted, not null.
+- **A `"pdf"` format streams thumbnails, not full pages.** Every per-page
+  transfer during a PDF scan is `kind: "thumbnail"` — a JPEG downscaled so
+  its long edge is at most 300px, intended for a progress display, not for
+  viewing the page at full quality. The full-resolution pages live only
+  inside the finished PDF, which arrives as a single `kind: "pdf"` transfer
+  once all pages are in. In `"png"` and `"jpeg"` output, there is no
+  thumbnail: `kind: "page"` carries the full-resolution image directly. If
+  PDF assembly fails, the scan does not complete — the agent sends `error`
+  with code `PDF_GENERATION_ERROR` instead of `scan_complete`.
 - **Only one scan runs at a time.** A `start_scan` sent while another scan
   is in progress is rejected immediately with `error` / `SCANNER_BUSY`; it
   does not queue.
@@ -145,6 +156,71 @@ Three behaviours worth knowing before you write a client against this:
   actually stopped. The scan's own `id` later receives either a normal
   `scan_complete` (if it finished before the cancellation took effect) or
   an `error` with code `SCAN_CANCELLED`.
+
+## Receiving binary transfers
+
+Page images and the finished PDF are not inlined in JSON. Each one is
+announced by a `binary_start` message, and the bytes follow immediately
+after as one or more binary WebSocket frames, totalling `total_bytes`
+bytes.
+
+- **Accumulate frames until you've received `total_bytes` bytes**, then
+  treat the transfer as complete. Do not assume a frame count — the chunk
+  size the agent splits a payload into is an implementation detail and may
+  change without notice.
+- **Text frames can interleave with a transfer in progress** — a `pong`
+  answering an unrelated `ping`, or the next `scan_progress`, may arrive
+  between binary frames. The WebSocket frame type (text vs. binary) is what
+  tells them apart, so handle the two independently rather than assuming
+  `binary_start` and its frames strictly alternate with nothing else
+  between them.
+- **`kind` tells you what the bytes are:** `"thumbnail"` is a downscaled
+  preview of one page, sent only for PDF output; `"page"` is the
+  full-resolution image of one page, sent only for PNG and JPEG output; and
+  `"pdf"` is the finished, assembled document, sent once, after the last
+  page.
+
+This accumulation rule is the one part of the protocol a client can't
+implement from the message list alone. A worked example:
+
+```js
+socket.binaryType = "arraybuffer";
+
+let pending = null;
+
+socket.onmessage = (event) => {
+  if (typeof event.data === "string") {
+    const msg = JSON.parse(event.data);
+    if (msg.type === "binary_start") {
+      pending = {
+        kind: msg.kind,
+        page: msg.page,
+        mime: msg.mime,
+        total: msg.total_bytes,
+        received: 0,
+        chunks: [],
+      };
+    } else {
+      handleMessage(msg); // scan_progress, scan_complete, error, pong
+    }
+    return;
+  }
+
+  // A binary frame belongs to the transfer announced most recently.
+  const chunk = new Uint8Array(event.data);
+  pending.chunks.push(chunk);
+  pending.received += chunk.byteLength;
+
+  if (pending.received >= pending.total) {
+    const blob = new Blob(pending.chunks, { type: pending.mime });
+    onTransfer(pending.kind, pending.page, blob); // "thumbnail" | "page" | "pdf"
+    pending = null;
+  }
+};
+```
+
+The loop above is driven entirely by `total_bytes` — never by a frame count
+or an assumed chunk size, both of which may change without notice.
 
 ## Error codes
 
@@ -186,9 +262,14 @@ ws://127.0.0.1:47115/?token=change-me
 ```
 
 Stick to URL-safe characters when choosing a token (letters, digits, `-`,
-`_`): the agent reads the query string by splitting on `&` and then `=`, so
-a token containing either of those, or a `%` or a space, must be
-percent-encoded in the connect URL or it won't be read back correctly.
+`_`). The agent reads the query string by first splitting on `&` to find
+the `token=...` pair, then splitting that pair on the first `=` — so an
+embedded `=` in the token's value is preserved correctly and does not need
+escaping. Two characters do need it: an unencoded `&` truncates the token
+at that point (the parser reads it as the start of the next query
+parameter), and an unencoded `%` can be misread as the start of a
+percent-escape if followed by hex digits. Percent-encode a token containing
+either, or avoid them by choosing a URL-safe token in the first place.
 
 The same value has to go in both places — the config file and the
 connecting page. This only makes sense when the deployer controls both; a
