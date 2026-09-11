@@ -58,9 +58,50 @@ impl Default for WsServerConfig {
 pub type CommandSender = mpsc::UnboundedSender<(ClientMessage, ResponseSender)>;
 pub type CommandReceiver = mpsc::UnboundedReceiver<(ClientMessage, ResponseSender)>;
 
+/// Chunk size for binary transfers. Comfortably below any frame limit, and
+/// small enough that a bounded channel throttles a slow client promptly.
+pub const CHUNK_BYTES: usize = 256 * 1024;
+
+/// Depth of the per-connection response queue. Deliberately small: this is
+/// the backpressure that keeps a large transfer from accumulating in memory.
+///
+/// The writer task is the only consumer and never sends on this channel, so
+/// bounding it cannot deadlock. Any future code that sends from the writer
+/// path would stall the pipeline.
+pub const RESPONSE_CHANNEL_CAPACITY: usize = 8;
+
+/// Something to write to one client's socket.
+#[derive(Debug)]
+pub enum OutgoingMessage {
+    /// A protocol message, serialised to a text frame.
+    Json(Box<AgentMessage>),
+    /// One chunk of a binary transfer announced by a preceding `BinaryStart`.
+    Binary(Vec<u8>),
+}
+
 /// Channel for sending responses back to a specific WS connection
-pub type ResponseSender = mpsc::UnboundedSender<AgentMessage>;
-pub type ResponseReceiver = mpsc::UnboundedReceiver<AgentMessage>;
+pub type ResponseSender = mpsc::Sender<OutgoingMessage>;
+pub type ResponseReceiver = mpsc::Receiver<OutgoingMessage>;
+
+/// Queue a protocol message. Errors are ignored: a disconnected client is
+/// normal, and every caller previously discarded the send result too.
+pub async fn send_json(tx: &ResponseSender, msg: AgentMessage) {
+    let _ = tx.send(OutgoingMessage::Json(Box::new(msg))).await;
+}
+
+/// Queue a payload as a sequence of `CHUNK_BYTES` frames.
+///
+/// Awaits on each frame, so a client that reads slowly slows the scan rather
+/// than causing the agent to buffer the whole transfer.
+pub async fn send_binary(
+    tx: &ResponseSender,
+    payload: &[u8],
+) -> Result<(), mpsc::error::SendError<OutgoingMessage>> {
+    for chunk in payload.chunks(CHUNK_BYTES) {
+        tx.send(OutgoingMessage::Binary(chunk.to_vec())).await?;
+    }
+    Ok(())
+}
 
 /// Broadcast channel for scanner events that should go to all connected clients
 pub type EventSender = broadcast::Sender<AgentMessage>;
@@ -162,7 +203,7 @@ async fn handle_connection(
 
     let (ws_tx, mut ws_rx) = ws_stream.split();
     let (response_tx, mut response_rx): (ResponseSender, ResponseReceiver) =
-        mpsc::unbounded_channel();
+        mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
 
     // Task: Forward responses and events to this client
     let ws_tx = Arc::new(Mutex::new(ws_tx));
@@ -181,12 +222,18 @@ async fn handle_connection(
             tokio::select! {
                 msg = response_rx.recv() => {
                     match msg {
-                        Some(msg) => {
-                            if let Ok(json) = serde_json::to_string(&msg) {
+                        Some(OutgoingMessage::Json(m)) => {
+                            if let Ok(json) = serde_json::to_string(&*m) {
                                 let mut tx = ws_tx_responses.lock().await;
                                 if tx.send(Message::Text(json)).await.is_err() {
                                     break;
                                 }
+                            }
+                        }
+                        Some(OutgoingMessage::Binary(bytes)) => {
+                            let mut tx = ws_tx_responses.lock().await;
+                            if tx.send(Message::Binary(bytes)).await.is_err() {
+                                break;
                             }
                         }
                         None => break,
@@ -480,5 +527,60 @@ mod tests {
     #[test]
     fn percent_decode_passthrough() {
         assert_eq!(percent_decode("no-encoding"), "no-encoding");
+    }
+
+    /// A bounded channel is what makes streaming real: without it, chunks pile
+    /// up in the queue and the memory simply moves rather than shrinking.
+    #[tokio::test]
+    async fn send_binary_splits_payloads_into_chunks_and_applies_backpressure() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<OutgoingMessage>(RESPONSE_CHANNEL_CAPACITY);
+
+        // Two and a half chunks.
+        let payload = vec![7u8; CHUNK_BYTES * 2 + 5];
+        let sender = tokio::spawn(async move {
+            send_binary(&tx, &payload).await.unwrap();
+        });
+
+        let mut received = Vec::new();
+        let mut frames = 0;
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                OutgoingMessage::Binary(bytes) => {
+                    frames += 1;
+                    assert!(bytes.len() <= CHUNK_BYTES, "frame exceeded the chunk size");
+                    received.extend_from_slice(&bytes);
+                }
+                OutgoingMessage::Json(_) => panic!("send_binary must not emit JSON"),
+            }
+        }
+
+        sender.await.unwrap();
+        assert_eq!(frames, 3, "expected two full chunks and one remainder");
+        assert_eq!(received.len(), CHUNK_BYTES * 2 + 5);
+        assert!(received.iter().all(|&b| b == 7));
+    }
+
+    #[tokio::test]
+    async fn send_binary_of_an_exact_multiple_emits_no_empty_trailing_frame() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<OutgoingMessage>(RESPONSE_CHANNEL_CAPACITY);
+        let payload = vec![1u8; CHUNK_BYTES * 2];
+        let sender = tokio::spawn(async move { send_binary(&tx, &payload).await.unwrap() });
+
+        let mut frames = 0;
+        while let Some(msg) = rx.recv().await {
+            if let OutgoingMessage::Binary(b) = msg {
+                assert!(!b.is_empty(), "empty frame emitted");
+                frames += 1;
+            }
+        }
+        sender.await.unwrap();
+        assert_eq!(frames, 2);
+    }
+
+    #[tokio::test]
+    async fn send_binary_reports_failure_when_the_client_is_gone() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<OutgoingMessage>(RESPONSE_CHANNEL_CAPACITY);
+        drop(rx);
+        assert!(send_binary(&tx, &[1, 2, 3]).await.is_err());
     }
 }

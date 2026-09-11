@@ -18,6 +18,8 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use crate::protocol::{AgentMessage, OutputFormat, ScanRequestOptions, ScanStatus};
+use crate::ws_server::send_json;
+use crate::ws_server::ResponseSender;
 
 // Scanner trait
 
@@ -276,7 +278,7 @@ pub async fn execute_native_scan(
     scan_id: String,
     scanner_name: &str,
     options: &ScanRequestOptions,
-    response_tx: mpsc::UnboundedSender<AgentMessage>,
+    response_tx: ResponseSender,
     cancel_flag: Arc<AtomicBool>,
 ) -> Result<(), ScanError> {
     let scanner_name = scanner_name.to_string();
@@ -384,12 +386,13 @@ pub async fn execute_native_scan(
         page_count += 1;
 
         // Send progress
-        let _ = response_tx.send(AgentMessage::ScanProgress {
+        send_json(&response_tx, AgentMessage::ScanProgress {
             id: request_id.clone(),
             scan_id: scan_id.clone(),
             page: page_count,
             status: ScanStatus::Scanning,
-        });
+        })
+        .await;
 
         // Convert page based on requested format
         match format {
@@ -400,13 +403,14 @@ pub async fn execute_native_scan(
                     &png_data,
                 );
 
-                let _ = response_tx.send(AgentMessage::ScanPage {
+                send_json(&response_tx, AgentMessage::ScanPage {
                     id: request_id.clone(),
                     scan_id: scan_id.clone(),
                     page: page_count,
                     data: encoded,
                     mime: "image/png".to_string(),
-                });
+                })
+                .await;
             }
             OutputFormat::Jpeg => {
                 let jpeg_data = page_data.to_jpeg(85)?;
@@ -415,13 +419,14 @@ pub async fn execute_native_scan(
                     &jpeg_data,
                 );
 
-                let _ = response_tx.send(AgentMessage::ScanPage {
+                send_json(&response_tx, AgentMessage::ScanPage {
                     id: request_id.clone(),
                     scan_id: scan_id.clone(),
                     page: page_count,
                     data: encoded,
                     mime: "image/jpeg".to_string(),
-                });
+                })
+                .await;
             }
             OutputFormat::Pdf => {
                 // Collect pages for PDF generation at the end
@@ -435,13 +440,14 @@ pub async fn execute_native_scan(
                     &preview,
                 );
 
-                let _ = response_tx.send(AgentMessage::ScanPage {
+                send_json(&response_tx, AgentMessage::ScanPage {
                     id: request_id.clone(),
                     scan_id: scan_id.clone(),
                     page: page_count,
                     data: encoded,
                     mime: "image/jpeg".to_string(),
-                });
+                })
+                .await;
             }
         }
     }
@@ -461,12 +467,13 @@ pub async fn execute_native_scan(
 
     // Generate PDF if requested
     let pdf_data = if matches!(format, OutputFormat::Pdf) && !all_pages.is_empty() {
-        let _ = response_tx.send(AgentMessage::ScanProgress {
+        send_json(&response_tx, AgentMessage::ScanProgress {
             id: request_id.clone(),
             scan_id: scan_id.clone(),
             page: page_count,
             status: ScanStatus::Processing,
-        });
+        })
+        .await;
 
         match crate::pdf::generate_pdf(&all_pages) {
             Ok(pdf_bytes) => Some(base64::Engine::encode(
@@ -483,12 +490,13 @@ pub async fn execute_native_scan(
     };
 
     // Send completion
-    let _ = response_tx.send(AgentMessage::ScanComplete {
+    send_json(&response_tx, AgentMessage::ScanComplete {
         id: request_id,
         scan_id,
         total_pages: page_count,
         pdf_data,
-    });
+    })
+    .await;
 
     Ok(())
 }
@@ -503,7 +511,7 @@ pub async fn execute_sidecar_scan(
     scanner_name: &str,
     options: &ScanRequestOptions,
     sidecar_path: &str,
-    response_tx: mpsc::UnboundedSender<AgentMessage>,
+    response_tx: ResponseSender,
     cancel_flag: Arc<AtomicBool>,
 ) -> Result<(), ScanError> {
     let scanner_name = scanner_name.to_string();
@@ -624,12 +632,13 @@ pub async fn execute_sidecar_scan(
 
         page_count += 1;
 
-        let _ = response_tx.send(AgentMessage::ScanProgress {
+        send_json(&response_tx, AgentMessage::ScanProgress {
             id: request_id.clone(),
             scan_id: scan_id.clone(),
             page: page_count,
             status: ScanStatus::Scanning,
-        });
+        })
+        .await;
 
         match format {
             OutputFormat::Png => {
@@ -638,13 +647,14 @@ pub async fn execute_sidecar_scan(
                     &base64::engine::general_purpose::STANDARD,
                     &png_data,
                 );
-                let _ = response_tx.send(AgentMessage::ScanPage {
+                send_json(&response_tx, AgentMessage::ScanPage {
                     id: request_id.clone(),
                     scan_id: scan_id.clone(),
                     page: page_count,
                     data: encoded,
                     mime: "image/png".to_string(),
-                });
+                })
+                .await;
             }
             OutputFormat::Jpeg => {
                 let jpeg_data = page_data.to_jpeg(85)?;
@@ -652,13 +662,14 @@ pub async fn execute_sidecar_scan(
                     &base64::engine::general_purpose::STANDARD,
                     &jpeg_data,
                 );
-                let _ = response_tx.send(AgentMessage::ScanPage {
+                send_json(&response_tx, AgentMessage::ScanPage {
                     id: request_id.clone(),
                     scan_id: scan_id.clone(),
                     page: page_count,
                     data: encoded,
                     mime: "image/jpeg".to_string(),
-                });
+                })
+                .await;
             }
             OutputFormat::Pdf => {
                 let png_data = page_data.to_png()?;
@@ -669,13 +680,14 @@ pub async fn execute_sidecar_scan(
                     &base64::engine::general_purpose::STANDARD,
                     &preview,
                 );
-                let _ = response_tx.send(AgentMessage::ScanPage {
+                send_json(&response_tx, AgentMessage::ScanPage {
                     id: request_id.clone(),
                     scan_id: scan_id.clone(),
                     page: page_count,
                     data: encoded,
                     mime: "image/jpeg".to_string(),
-                });
+                })
+                .await;
             }
         }
     }
@@ -695,12 +707,13 @@ pub async fn execute_sidecar_scan(
 
     // Generate PDF if requested
     let pdf_data = if matches!(format, OutputFormat::Pdf) && !all_pages.is_empty() {
-        let _ = response_tx.send(AgentMessage::ScanProgress {
+        send_json(&response_tx, AgentMessage::ScanProgress {
             id: request_id.clone(),
             scan_id: scan_id.clone(),
             page: page_count,
             status: ScanStatus::Processing,
-        });
+        })
+        .await;
 
         match crate::pdf::generate_pdf(&all_pages) {
             Ok(pdf_bytes) => Some(base64::Engine::encode(
@@ -716,12 +729,13 @@ pub async fn execute_sidecar_scan(
         None
     };
 
-    let _ = response_tx.send(AgentMessage::ScanComplete {
+    send_json(&response_tx, AgentMessage::ScanComplete {
         id: request_id,
         scan_id,
         total_pages: page_count,
         pdf_data,
-    });
+    })
+    .await;
 
     Ok(())
 }
