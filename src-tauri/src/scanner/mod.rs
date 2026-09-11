@@ -5,6 +5,7 @@
 
 pub mod raw;
 pub mod sidecar;
+pub mod thumbnail;
 pub mod twain;
 pub mod twain_ffi;
 
