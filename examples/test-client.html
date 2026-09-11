@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RSWebTWAIN test client</title>
+<style>
+  :root {
+    --bg: #fbfaf8;
+    --panel: #ffffff;
+    --ink: #1c1b19;
+    --muted: #6b6862;
+    --line: #e3e0da;
+    --accent: #2f6f4f;
+    --warn: #9a3412;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16150f;
+      --panel: #1e1d18;
+      --ink: #ece9e2;
+      --muted: #9a958b;
+      --line: #34322b;
+      --accent: #7fb996;
+      --warn: #f0a882;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px 16px 64px;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1020px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
+  fieldset {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 16px;
+    margin: 0 0 16px;
+  }
+  legend { padding: 0 8px; font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  input[type=text], input[type=number], select {
+    width: 100%; padding: 7px 9px; font: inherit; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row > * { flex: 1 1 150px; min-width: 0; }
+  .checks { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 12px; }
+  .checks label { display: flex; align-items: center; gap: 6px; color: var(--ink); margin: 0; font-size: 14px; }
+  .checks input { width: auto; }
+  button {
+    font: inherit; font-weight: 600; padding: 8px 16px; border-radius: 6px;
+    border: 1px solid var(--accent); background: var(--accent); color: var(--panel); cursor: pointer;
+  }
+  button.ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+  .dot.on { background: var(--accent); }
+  .dot.err { background: var(--warn); }
+  #status { font-size: 13px; color: var(--muted); }
+  #pages { display: flex; gap: 10px; flex-wrap: wrap; }
+  .page { border: 1px solid var(--line); border-radius: 6px; padding: 6px; background: var(--bg); text-align: center; }
+  .page img { display: block; max-width: 150px; height: auto; border-radius: 3px; }
+  .page figcaption { font: 11px var(--mono); color: var(--muted); margin-top: 4px; }
+  #log {
+    font: 12px/1.45 var(--mono); background: var(--bg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 10px; height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  .l-tx { color: var(--accent); }
+  .l-rx { color: var(--ink); }
+  .l-bin { color: var(--muted); }
+  .l-err { color: var(--warn); font-weight: 600; }
+  .note { font-size: 13px; color: var(--muted); border-left: 3px solid var(--line); padding-left: 12px; margin: 0 0 20px; }
+  .note strong { color: var(--ink); }
+  code { font: 12px var(--mono); background: var(--bg); padding: 1px 4px; border-radius: 3px; border: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>RSWebTWAIN test client</h1>
+<p class="sub">A dependency-free harness for driving the scan agent against a real scanner.</p>
+
+<p class="note">
+  <strong>Serve this over http://localhost — do not open it as a file.</strong>
+  A <code>file://</code> page sends <code>Origin: null</code>, which the agent rejects.
+  From this directory: <code>python -m http.server 8080</code>, then open
+  <code>http://localhost:8080/test-client.html</code>.
+  An <code>https://</code> page cannot reach <code>ws://</code> at all (mixed content), so a hosted
+  copy will not work either.
+</p>
+
+<fieldset>
+  <legend>Connection</legend>
+  <div class="row">
+    <div>
+      <label for="url">Agent URL</label>
+      <input type="text" id="url" value="ws://127.0.0.1:47115">
+    </div>
+    <div>
+      <label for="token">Auth token (only if config.toml sets one)</label>
+      <input type="text" id="token" placeholder="usually empty">
+    </div>
+  </div>
+  <div class="bar">
+    <button id="connect">Connect</button>
+    <button id="disconnect" class="ghost" disabled>Disconnect</button>
+    <button id="ping" class="ghost" disabled>Ping</button>
+    <span class="dot" id="dot"></span>
+    <span id="status">not connected</span>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>Scanner</legend>
+  <div class="row">
+    <div style="flex: 3 1 320px;">
+      <label for="scanner">Source <span id="scount"></span></label>
+      <select id="scanner"><option value="">— not listed yet —</option></select>
+    </div>
+    <div style="flex: 0 0 auto; display: flex; align-items: flex-end;">
+      <button id="list" class="ghost" disabled>List scanners</button>
+    </div>
+  </div>
+  <p class="note" style="margin: 12px 0 0; border: 0; padding: 0;">
+    The agent resolves a scanner by name only after a <code>list_scanners</code> call, so list before scanning.
+  </p>
+</fieldset>
+
+<fieldset>
+  <legend>Scan options</legend>
+  <div class="row">
+    <div>
+      <label for="resolution">Resolution (DPI)</label>
+      <input type="number" id="resolution" value="300" min="50" max="1200" step="50">
+    </div>
+    <div>
+      <label for="color">Colour mode</label>
+      <select id="color">
+        <option value="color">color</option>
+        <option value="grayscale">grayscale</option>
+        <option value="bw">bw (1-bit)</option>
+      </select>
+    </div>
+    <div>
+      <label for="format">Output format</label>
+      <select id="format">
+        <option value="pdf">pdf</option>
+        <option value="png">png</option>
+        <option value="jpeg">jpeg</option>
+      </select>
+    </div>
+  </div>
+  <div class="checks">
+    <label><input type="checkbox" id="adf"> Use ADF</label>
+    <label><input type="checkbox" id="duplex"> Duplex</label>
+    <label><input type="checkbox" id="showui"> Show scanner UI</label>
+  </div>
+  <div class="bar">
+    <button id="scan" disabled>Start scan</button>
+    <button id="cancel" class="ghost" disabled>Cancel</button>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>Result</legend>
+  <div class="bar" id="result" style="margin: 0 0 12px;"><span id="rsummary" style="font-size:13px;color:var(--muted)">nothing yet</span></div>
+  <div id="pages"></div>
+</fieldset>
+
+<fieldset>
+  <legend>Protocol log</legend>
+  <div id="log"></div>
+  <div class="bar"><button id="clear" class="ghost">Clear</button></div>
+</fieldset>
+
+</div>
+
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+let socket = null;
+let pending = null;        // in-flight binary transfer
+let currentScanId = null;
+let counter = 0;
+const nextId = (p) => `${p}-${++counter}`;
+
+// ---------- logging ----------
+
+function log(cls, text) {
+  const el = $("log");
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  const line = document.createElement("div");
+  line.className = cls;
+  const t = new Date().toISOString().substr(11, 12);
+  line.textContent = `${t}  ${text}`;
+  el.appendChild(line);
+  if (atBottom) el.scrollTop = el.scrollHeight;
+}
+
+function setStatus(text, state) {
+  $("status").textContent = text;
+  $("dot").className = "dot" + (state ? " " + state : "");
+}
+
+function enable(connected) {
+  $("connect").disabled = connected;
+  $("disconnect").disabled = !connected;
+  $("ping").disabled = !connected;
+  $("list").disabled = !connected;
+  $("scan").disabled = !connected;
+}
+
+// ---------- connection ----------
+
+function connect() {
+  const base = $("url").value.trim();
+  const token = $("token").value.trim();
+  const url = token ? `${base}/?token=${encodeURIComponent(token)}` : base;
+
+  setStatus("connecting…");
+  log("l-tx", `connecting to ${url}`);
+
+  try {
+    socket = new WebSocket(url);
+  } catch (e) {
+    log("l-err", `could not construct socket: ${e.message}`);
+    setStatus("failed", "err");
+    return;
+  }
+
+  socket.binaryType = "arraybuffer";
+
+  socket.onopen = () => {
+    setStatus("connected", "on");
+    log("l-rx", "socket open");
+    enable(true);
+    listScanners();          // the agent needs this before it can resolve a name
+  };
+
+  socket.onclose = (ev) => {
+    setStatus(`closed (code ${ev.code})`, ev.wasClean ? "" : "err");
+    log(ev.wasClean ? "l-rx" : "l-err", `socket closed: code=${ev.code} reason=${ev.reason || "(none)"}`);
+    enable(false);
+    $("cancel").disabled = true;
+    socket = null;
+    pending = null;
+  };
+
+  // The browser deliberately hides the HTTP status of a failed handshake, so a
+  // 403 (origin) and a 401 (token) look identical here. The agent's log has it.
+  socket.onerror = () => {
+    log("l-err", "socket error — if the handshake was rejected, check the agent log for the reason (origin or token)");
+    setStatus("error", "err");
+  };
+
+  socket.onmessage = onMessage;
+}
+
+function send(obj) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    log("l-err", "not connected");
+    return;
+  }
+  const json = JSON.stringify(obj);
+  socket.send(json);
+  log("l-tx", `→ ${json}`);
+}
+
+// ---------- receiving ----------
+
+function onMessage(ev) {
+  if (typeof ev.data === "string") {
+    let msg;
+    try {
+      msg = JSON.parse(ev.data);
+    } catch (e) {
+      log("l-err", `unparseable text frame: ${ev.data.slice(0, 200)}`);
+      return;
+    }
+    handleJson(msg, ev.data);
+    return;
+  }
+
+  // Binary frame: part of the transfer announced most recently.
+  const chunk = new Uint8Array(ev.data);
+  if (!pending) {
+    log("l-err", `binary frame (${chunk.byteLength}B) with no preceding binary_start — ignoring`);
+    return;
+  }
+  pending.chunks.push(chunk);
+  pending.received += chunk.byteLength;
+  log("l-bin", `  …${pending.kind} chunk ${chunk.byteLength}B (${pending.received}/${pending.total})`);
+
+  // Drive completion from total_bytes, never from a frame count: the agent's
+  // chunk size is an implementation detail and may change.
+  if (pending.received >= pending.total) {
+    const done = pending;
+    pending = null;
+    if (done.received !== done.total) {
+      log("l-err", `transfer overshot: got ${done.received}, announced ${done.total}`);
+    }
+    finishTransfer(done);
+  }
+}
+
+function handleJson(msg, raw) {
+  switch (msg.type) {
+    case "binary_start":
+      if (pending) log("l-err", "a new transfer began before the previous one finished");
+      pending = {
+        kind: msg.kind,
+        page: msg.page,
+        mime: msg.mime,
+        total: msg.total_bytes,
+        received: 0,
+        chunks: [],
+      };
+      log("l-rx", `← binary_start ${msg.kind}${msg.page ? " page " + msg.page : ""} ${msg.total_bytes}B ${msg.mime}`);
+      return;
+
+    case "scanner_list": {
+      const sel = $("scanner");
+      sel.innerHTML = "";
+      if (!msg.scanners.length) {
+        sel.innerHTML = '<option value="">— no scanners found —</option>';
+      } else {
+        for (const s of msg.scanners) {
+          const o = document.createElement("option");
+          o.value = s.name;
+          o.textContent = `${s.name}  ·  ${s.manufacturer}`;
+          sel.appendChild(o);
+        }
+      }
+      $("scount").textContent = `(${msg.scanners.length})`;
+      log("l-rx", `← scanner_list: ${msg.scanners.length} source(s)`);
+      return;
+    }
+
+    case "scan_progress":
+      currentScanId = msg.scan_id;
+      $("cancel").disabled = false;
+      setStatus(`${msg.status} — page ${msg.page}`, "on");
+      log("l-rx", `← scan_progress page=${msg.page} status=${msg.status}`);
+      return;
+
+    case "scan_complete":
+      $("cancel").disabled = true;
+      currentScanId = null;
+      setStatus(`complete — ${msg.total_pages} page(s)`, "on");
+      log("l-rx", `← scan_complete total_pages=${msg.total_pages}`);
+      $("rsummary").textContent = `${msg.total_pages} page(s) scanned`;
+      return;
+
+    case "error":
+      $("cancel").disabled = true;
+      currentScanId = null;
+      setStatus(`error: ${msg.code}`, "err");
+      log("l-err", `← error ${msg.code}: ${msg.message}`);
+      return;
+
+    case "pong":
+      log("l-rx", `← pong (${msg.id})`);
+      return;
+
+    case "server_shutdown":
+      log("l-err", "← server_shutdown — the agent is exiting");
+      return;
+
+    // Broadcast to every connected client when a rswebtwain:// link is opened.
+    case "deep_link":
+      log("l-rx", `← deep_link action=${msg.action ?? "(none)"} url=${msg.url}`);
+      return;
+
+    default:
+      log("l-rx", `← ${raw.slice(0, 300)}`);
+  }
+}
+
+function finishTransfer(t) {
+  const blob = new Blob(t.chunks, { type: t.mime });
+  const url = URL.createObjectURL(blob);
+  log("l-rx", `✓ ${t.kind} complete: ${blob.size}B ${t.mime}`);
+
+  if (t.kind === "pdf") {
+    const bar = $("result");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `scan-${Date.now()}.pdf`;
+    a.textContent = `Download PDF (${(blob.size / 1024).toFixed(0)} KB)`;
+    a.style.cssText = "font-weight:600;color:var(--accent)";
+    bar.appendChild(document.createTextNode(" "));
+    bar.appendChild(a);
+    return;
+  }
+
+  // thumbnail (pdf mode) or page (png/jpeg mode)
+  const fig = document.createElement("figure");
+  fig.className = "page";
+  fig.style.margin = "0";
+  const img = new Image();
+  img.src = url;
+  img.alt = `page ${t.page}`;
+  const cap = document.createElement("figcaption");
+  // Report the decoded pixel dimensions: for png/jpeg output this is the real
+  // scanned size, which is how you check that the requested DPI took effect.
+  img.onload = () => {
+    cap.textContent = `p${t.page} · ${img.naturalWidth}×${img.naturalHeight} · ${(blob.size / 1024).toFixed(0)}KB`;
+  };
+  cap.textContent = `p${t.page} · ${(blob.size / 1024).toFixed(0)}KB`;
+  fig.appendChild(img);
+  fig.appendChild(cap);
+  $("pages").appendChild(fig);
+}
+
+// ---------- actions ----------
+
+function listScanners() {
+  send({ type: "list_scanners", id: nextId("ls") });
+}
+
+function startScan() {
+  $("pages").innerHTML = "";
+  $("result").innerHTML = '<span id="rsummary" style="font-size:13px;color:var(--muted)">scanning…</span>';
+  pending = null;
+
+  send({
+    type: "start_scan",
+    id: nextId("scan"),
+    options: {
+      scanner_id: $("scanner").value || null,
+      resolution: Number($("resolution").value) || 300,
+      color_mode: $("color").value,
+      format: $("format").value,
+      use_adf: $("adf").checked,
+      duplex: $("duplex").checked,
+      show_scanner_ui: $("showui").checked,
+    },
+  });
+}
+
+function cancelScan() {
+  if (!currentScanId) {
+    log("l-err", "no active scan to cancel");
+    return;
+  }
+  send({ type: "cancel_scan", id: nextId("cancel"), scan_id: currentScanId });
+}
+
+$("connect").onclick = connect;
+$("disconnect").onclick = () => socket && socket.close();
+$("ping").onclick = () => send({ type: "ping", id: nextId("ping") });
+$("list").onclick = listScanners;
+$("scan").onclick = startScan;
+$("cancel").onclick = cancelScan;
+$("clear").onclick = () => ($("log").innerHTML = "");
+
+log("l-bin", "ready — set the agent URL and press Connect");
+</script>
+</body>
+</html>
