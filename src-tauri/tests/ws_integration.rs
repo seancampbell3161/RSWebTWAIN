@@ -8,22 +8,16 @@ use scan_agent_lib::ws_server::{self, WsServerConfig};
 use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::tungstenite::Message;
 
-/// Find an available port by binding to port 0
-async fn get_free_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    listener.local_addr().unwrap().port()
-}
-
 #[tokio::test]
 async fn ping_pong() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: None,
     };
 
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
 
     // Spawn the command handler in the background
     let event_tx = handle.event_tx.clone();
@@ -55,14 +49,14 @@ async fn ping_pong() {
 
 #[tokio::test]
 async fn list_scanners_returns_valid_response() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: None,
     };
 
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let event_tx = handle.event_tx.clone();
     let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
 
@@ -99,14 +93,14 @@ async fn list_scanners_returns_valid_response() {
 
 #[tokio::test]
 async fn invalid_json_returns_error() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: None,
     };
 
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let event_tx = handle.event_tx.clone();
     let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
 
@@ -133,14 +127,14 @@ async fn invalid_json_returns_error() {
 
 #[tokio::test]
 async fn multiple_clients_can_connect() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: None,
     };
 
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let event_tx = handle.event_tx.clone();
     let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
 
@@ -186,14 +180,14 @@ async fn multiple_clients_can_connect() {
 
 #[tokio::test]
 async fn auth_token_valid_connects() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: Some("secret".to_string()),
     };
 
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let event_tx = handle.event_tx.clone();
     let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
 
@@ -220,14 +214,14 @@ async fn auth_token_valid_connects() {
 
 #[tokio::test]
 async fn auth_token_invalid_rejected() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: Some("secret".to_string()),
     };
 
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let _handler = tokio::spawn(scan_agent_lib::command_handler(
         handle.command_rx,
         handle.event_tx.clone(),
@@ -247,14 +241,14 @@ async fn auth_token_invalid_rejected() {
 
 #[tokio::test]
 async fn auth_token_missing_rejected() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: Some("secret".to_string()),
     };
 
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let _handler = tokio::spawn(scan_agent_lib::command_handler(
         handle.command_rx,
         handle.event_tx.clone(),
@@ -293,9 +287,8 @@ fn ws_request_with_origin(port: u16, origin: &str) -> tungstenite::http::Request
 
 #[tokio::test]
 async fn origin_allowed_connects() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
             allow_localhost: false,
             extra: vec!["https://app.example.com".to_string()],
@@ -304,6 +297,7 @@ async fn origin_allowed_connects() {
     };
 
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let event_tx = handle.event_tx.clone();
     let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
 
@@ -330,9 +324,8 @@ async fn origin_allowed_connects() {
 
 #[tokio::test]
 async fn origin_disallowed_rejected() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
             allow_localhost: false,
             extra: vec!["https://app.example.com".to_string()],
@@ -341,6 +334,7 @@ async fn origin_disallowed_rejected() {
     };
 
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let _handler = tokio::spawn(scan_agent_lib::command_handler(
         handle.command_rx,
         handle.event_tx.clone(),
@@ -360,9 +354,8 @@ async fn origin_disallowed_rejected() {
 
 #[tokio::test]
 async fn origin_missing_rejected() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
             allow_localhost: false,
             extra: vec!["https://app.example.com".to_string()],
@@ -371,6 +364,7 @@ async fn origin_missing_rejected() {
     };
 
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let _handler = tokio::spawn(scan_agent_lib::command_handler(
         handle.command_rx,
         handle.event_tx.clone(),
@@ -393,14 +387,14 @@ async fn origin_missing_rejected() {
 
 #[tokio::test]
 async fn cancel_unknown_scan_returns_error() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: None,
     };
 
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let event_tx = handle.event_tx.clone();
     let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
 
@@ -448,9 +442,8 @@ async fn connect_with_origin(
 
 #[tokio::test]
 async fn restricted_allows_http_localhost() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
             allow_localhost: true,
             extra: vec![],
@@ -458,6 +451,7 @@ async fn restricted_allows_http_localhost() {
         auth_token: None,
     };
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let event_tx = handle.event_tx.clone();
     let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
 
@@ -467,9 +461,8 @@ async fn restricted_allows_http_localhost() {
 
 #[tokio::test]
 async fn restricted_allows_127_0_0_1() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
             allow_localhost: true,
             extra: vec![],
@@ -477,6 +470,7 @@ async fn restricted_allows_127_0_0_1() {
         auth_token: None,
     };
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let event_tx = handle.event_tx.clone();
     let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
 
@@ -486,9 +480,8 @@ async fn restricted_allows_127_0_0_1() {
 
 #[tokio::test]
 async fn restricted_allows_ipv6_loopback() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
             allow_localhost: true,
             extra: vec![],
@@ -496,6 +489,7 @@ async fn restricted_allows_ipv6_loopback() {
         auth_token: None,
     };
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let event_tx = handle.event_tx.clone();
     let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
 
@@ -505,9 +499,8 @@ async fn restricted_allows_ipv6_loopback() {
 
 #[tokio::test]
 async fn restricted_rejects_internet_origin() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
             allow_localhost: true,
             extra: vec![],
@@ -515,6 +508,7 @@ async fn restricted_rejects_internet_origin() {
         auth_token: None,
     };
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let event_tx = handle.event_tx.clone();
     let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
 
@@ -527,9 +521,8 @@ async fn restricted_rejects_internet_origin() {
 
 #[tokio::test]
 async fn restricted_rejects_missing_origin() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
             allow_localhost: true,
             extra: vec![],
@@ -537,6 +530,7 @@ async fn restricted_rejects_missing_origin() {
         auth_token: None,
     };
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let event_tx = handle.event_tx.clone();
     let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
 
@@ -549,9 +543,8 @@ async fn restricted_rejects_missing_origin() {
 
 #[tokio::test]
 async fn restricted_extra_origin_exact_match_allowed() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::Restricted {
             allow_localhost: false,
             extra: vec!["https://app.example.com".to_string()],
@@ -559,6 +552,7 @@ async fn restricted_extra_origin_exact_match_allowed() {
         auth_token: None,
     };
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let event_tx = handle.event_tx.clone();
     let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
 
@@ -574,18 +568,61 @@ async fn restricted_extra_origin_exact_match_allowed() {
 
 const FAKE_SIDECAR: &str = env!("CARGO_BIN_EXE_fake_sidecar");
 
+/// The fake sidecar is configured through environment variables, which are
+/// process-global and therefore shared by every test in this binary. Tests
+/// that depend on a particular fake-sidecar configuration take this lock so
+/// they cannot observe each other's settings.
+/// A tokio mutex rather than a `std` one: the guard is held across awaits for
+/// the whole body of a test, which a blocking mutex must not be.
+static SIDECAR_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Sets fake-sidecar environment variables and restores the previous values
+/// on drop, so a failing assertion cannot leak configuration into the next
+/// test that takes `SIDECAR_ENV`.
+struct SidecarEnv {
+    previous: Vec<(&'static str, Option<String>)>,
+}
+
+impl SidecarEnv {
+    fn set(vars: &[(&'static str, &str)]) -> Self {
+        let previous = vars
+            .iter()
+            .map(|(k, v)| {
+                let old = std::env::var(k).ok();
+                std::env::set_var(k, v);
+                (*k, old)
+            })
+            .collect();
+        Self { previous }
+    }
+}
+
+impl Drop for SidecarEnv {
+    fn drop(&mut self) {
+        for (key, value) in &self.previous {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
 /// Drive a scan against the fake sidecar and confirm a second concurrent
 /// `start_scan` is rejected with `SCANNER_BUSY` while the first is in-flight.
 #[tokio::test]
 async fn concurrent_start_scan_returns_busy() {
-    let port = get_free_port().await;
+    // Relies on the default scan delay holding the first scan open.
+    let _env = SIDECAR_ENV.lock().await;
+
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: None,
     };
 
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let event_tx = handle.event_tx.clone();
     let handler = tokio::spawn(scan_agent_lib::command_handler(
         handle.command_rx,
@@ -693,17 +730,99 @@ async fn concurrent_start_scan_returns_busy() {
 
 #[tokio::test]
 async fn allow_all_accepts_anything() {
-    let port = get_free_port().await;
     let config = WsServerConfig {
-        port,
+        port: 0,
         origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
         auth_token: None,
     };
     let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
     let event_tx = handle.event_tx.clone();
     let handler = tokio::spawn(scan_agent_lib::command_handler(handle.command_rx, event_tx, None));
 
     connect_with_origin(port, Some("https://anything.example.com")).await.expect("AllowAll");
     connect_with_origin(port, None).await.expect("AllowAll missing-origin");
+    handler.abort();
+}
+
+/// A sidecar that emits real page bitmaps exercises the stride-handling path:
+/// the source reports padded rows, and the agent must strip that padding
+/// rather than hand a mis-sized buffer to the image encoder.
+#[tokio::test]
+async fn sidecar_pages_with_padded_rows_reach_the_client() {
+    let _env = SIDECAR_ENV.lock().await;
+
+    let config = WsServerConfig {
+        port: 0,
+        origin_policy: scan_agent_lib::ws_server::OriginPolicy::AllowAll,
+        auth_token: None,
+    };
+
+    let handle = ws_server::start_server(config).await.unwrap();
+    let port = handle.port;
+    let event_tx = handle.event_tx.clone();
+    let handler = tokio::spawn(scan_agent_lib::command_handler(
+        handle.command_rx,
+        event_tx,
+        Some(FAKE_SIDECAR.to_string()),
+    ));
+
+    let _sidecar_env = SidecarEnv::set(&[
+        ("FAKE_SIDECAR_EMIT_PAGES", "1"),
+        ("FAKE_SIDECAR_SCAN_DELAY_MS", "0"),
+    ]);
+
+    let url = format!("ws://127.0.0.1:{}", port);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut tx, mut rx) = ws_stream.split();
+
+    // Discovery has to run before the orchestrator can resolve a scanner name.
+    tx.send(Message::Text(
+        r#"{"type":"list_scanners","id":"ls-pad"}"#.into(),
+    ))
+    .await
+    .unwrap();
+    let listed = tokio::time::timeout(std::time::Duration::from_secs(15), rx.next())
+        .await
+        .expect("Timeout waiting for scanner_list")
+        .expect("Stream ended")
+        .expect("WS error");
+    let listed: serde_json::Value = serde_json::from_str(&listed.into_text().unwrap()).unwrap();
+    assert_eq!(listed["type"], "scanner_list", "expected scanner_list, got: {listed}");
+
+    tx.send(Message::Text(
+        r#"{"type":"start_scan","id":"scan-pad","options":{"scanner_id":"Fake Scanner","format":"png"}}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    let mut pages = 0;
+    let mut completed = false;
+    for _ in 0..20 {
+        let response = tokio::time::timeout(std::time::Duration::from_secs(15), rx.next())
+            .await
+            .expect("Timeout waiting for scan messages")
+            .expect("Stream ended")
+            .expect("WS error");
+        let v: serde_json::Value = serde_json::from_str(&response.into_text().unwrap()).unwrap();
+
+        match v["type"].as_str() {
+            Some("scan_page") => {
+                let data = v["data"].as_str().expect("page carries data");
+                assert!(!data.is_empty(), "page {} had empty data", v["page"]);
+                pages += 1;
+            }
+            Some("scan_complete") => {
+                completed = true;
+                break;
+            }
+            Some("error") => panic!("scan failed: {v}"),
+            _ => {}
+        }
+    }
+
+    assert!(completed, "never received scan_complete");
+    assert_eq!(pages, 2, "expected both emitted pages to arrive");
+
     handler.abort();
 }

@@ -34,11 +34,43 @@ struct ScanState {
     /// Whether a scan is currently in progress (fast atomic check).
     scanning: AtomicBool,
     /// Details of the active scan (for cancellation targeting).
-    active_scan: Mutex<Option<ActiveScan>>,
+    ///
+    /// A `std` mutex rather than a `tokio` one: it is only ever held for a
+    /// field assignment, never across an await, and `ScanGuard::drop` has to
+    /// be able to take it synchronously while unwinding.
+    active_scan: std::sync::Mutex<Option<ActiveScan>>,
     /// The scanner orchestrator (locked briefly for discovery/resolution, not during scans).
     orchestrator: Mutex<ScanOrchestrator>,
     /// Path to the 32-bit sidecar executable (None if unavailable).
     sidecar_path: Option<String>,
+}
+
+/// Releases the single-scan lock when dropped.
+///
+/// The scan pipeline decodes and encodes image data, so a malformed page can
+/// panic the task. Clearing the flag from `Drop` means that unwinding still
+/// releases the scanner — clearing it inline at the end of the handler did
+/// not, which left the agent answering every later scan with `SCANNER_BUSY`
+/// until it was restarted.
+struct ScanGuard {
+    state: Arc<ScanState>,
+}
+
+impl ScanGuard {
+    fn new(state: Arc<ScanState>) -> Self {
+        Self { state }
+    }
+}
+
+impl Drop for ScanGuard {
+    fn drop(&mut self) {
+        // A poisoned lock still needs clearing, or the agent stays busy forever.
+        match self.state.active_scan.lock() {
+            Ok(mut active) => *active = None,
+            Err(poisoned) => *poisoned.into_inner() = None,
+        }
+        self.state.scanning.store(false, Ordering::Release);
+    }
 }
 
 /// Process incoming WebSocket commands and dispatch to the scanner orchestrator.
@@ -52,7 +84,7 @@ pub async fn command_handler(
 ) {
     let state = Arc::new(ScanState {
         scanning: AtomicBool::new(false),
-        active_scan: Mutex::new(None),
+        active_scan: std::sync::Mutex::new(None),
         orchestrator: Mutex::new(ScanOrchestrator::new(sidecar_path.clone())),
         sidecar_path,
     });
@@ -152,12 +184,16 @@ async fn handle_command(
                 return;
             }
 
+            // From here on the scan is owned by this guard: every exit path,
+            // including an unwind, releases the scanner.
+            let _scan_guard = ScanGuard::new(state.clone());
+
             let scan_id = uuid::Uuid::new_v4().to_string();
             let cancel_flag = Arc::new(AtomicBool::new(false));
 
             // Register the active scan
             {
-                let mut active = state.active_scan.lock().await;
+                let mut active = state.active_scan.lock().unwrap();
                 *active = Some(ActiveScan {
                     scan_id: scan_id.clone(),
                     cancel_flag: cancel_flag.clone(),
@@ -219,16 +255,11 @@ async fn handle_command(
                 }
             }
 
-            // Always clear scanning state
-            {
-                let mut active = state.active_scan.lock().await;
-                *active = None;
-            }
-            state.scanning.store(false, Ordering::Release);
+            // `_scan_guard` clears the scanning state as it drops here.
         }
 
         ClientMessage::CancelScan { id, scan_id } => {
-            let active = state.active_scan.lock().await;
+            let active = state.active_scan.lock().unwrap();
             match &*active {
                 Some(active_scan) if active_scan.scan_id == scan_id => {
                     info!("Cancelling scan {}", scan_id);
@@ -272,5 +303,53 @@ fn error_to_code(e: &scanner::ScanError) -> ErrorCode {
         }
         scanner::ScanError::Sidecar(_) => ErrorCode::InternalError,
         scanner::ScanError::Twain(_) => ErrorCode::InternalError,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::AssertUnwindSafe;
+
+    fn busy_state() -> Arc<ScanState> {
+        Arc::new(ScanState {
+            scanning: AtomicBool::new(true),
+            active_scan: std::sync::Mutex::new(Some(ActiveScan {
+                scan_id: "scan-1".to_string(),
+                cancel_flag: Arc::new(AtomicBool::new(false)),
+            })),
+            orchestrator: Mutex::new(ScanOrchestrator::new(None)),
+            sidecar_path: None,
+        })
+    }
+
+    #[test]
+    fn scan_guard_clears_busy_state_on_drop() {
+        let state = busy_state();
+        {
+            let _guard = ScanGuard::new(state.clone());
+        }
+        assert!(!state.scanning.load(Ordering::Acquire));
+        assert!(state.active_scan.lock().unwrap().is_none());
+    }
+
+    /// The defect this guards against: a panic while encoding a page used to
+    /// skip the busy-flag reset, leaving the agent rejecting every later scan
+    /// with SCANNER_BUSY until it was restarted.
+    #[test]
+    fn scan_guard_clears_busy_state_when_the_scan_panics() {
+        let state = busy_state();
+
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _guard = ScanGuard::new(state.clone());
+            panic!("page encoding blew up");
+        }));
+
+        assert!(result.is_err(), "expected the panic to propagate");
+        assert!(
+            !state.scanning.load(Ordering::Acquire),
+            "busy flag stayed set after a panic — the agent would be bricked"
+        );
+        assert!(state.active_scan.lock().unwrap().is_none());
     }
 }

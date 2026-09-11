@@ -59,6 +59,9 @@ pub enum TwainError {
     #[error("Memory allocation failed")]
     MemoryError,
 
+    #[error("Source returned compressed image data (compression type {0}); only uncompressed memory transfers are supported")]
+    UnsupportedCompression(u16),
+
     #[error("Hidden window creation failed: {0}")]
     WindowCreationFailed(String),
 }
@@ -155,6 +158,8 @@ pub struct ScannedPage {
     pub bits_per_pixel: u16,
     pub x_resolution: f32,
     pub y_resolution: f32,
+    /// Stride of `data` in bytes, from `TW_IMAGEMEMXFER.BytesPerRow`.
+    pub bytes_per_row: u32,
     pub data: Vec<u8>,
 }
 
@@ -1031,6 +1036,7 @@ impl TransferReady {
         // Allocate buffer and collect image strips
         let mut buffer = vec![0u8; buf_size];
         let mut image_data = Vec::new();
+        let mut bytes_per_row: u32 = 0;
 
         loop {
             let handle = self.handle.as_mut().expect("TransferReady: no handle");
@@ -1054,6 +1060,17 @@ impl TransferReady {
             };
 
             if rc == TWRC_SUCCESS || rc == TWRC_XFERDONE {
+                // The buffer is a raw bitmap only when the source left it
+                // uncompressed; anything else would be decoded as garbage.
+                if mem_xfer.Compression != TWCP_NONE {
+                    return Err(TwainError::UnsupportedCompression(mem_xfer.Compression));
+                }
+
+                // Row stride is constant for the image; take it from the first strip.
+                if bytes_per_row == 0 {
+                    bytes_per_row = mem_xfer.BytesPerRow;
+                }
+
                 let bytes_written = mem_xfer.BytesWritten as usize;
                 image_data.extend_from_slice(&buffer[..bytes_written]);
 
@@ -1088,6 +1105,7 @@ impl TransferReady {
             bits_per_pixel: image_info.BitsPerPixel as u16,
             x_resolution: image_info.XResolution.to_f32(),
             y_resolution: image_info.YResolution.to_f32(),
+            bytes_per_row,
             data: image_data,
         };
 

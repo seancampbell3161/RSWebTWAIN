@@ -70,6 +70,9 @@ pub struct WsServerHandle {
     shutdown_tx: broadcast::Sender<()>,
     pub command_rx: CommandReceiver,
     pub event_tx: EventSender,
+    /// The port actually bound. Equals the configured port, except when the
+    /// config asked for 0, where the OS chooses and this reports the choice.
+    pub port: u16,
 }
 
 impl WsServerHandle {
@@ -82,7 +85,9 @@ impl WsServerHandle {
 pub async fn start_server(config: WsServerConfig) -> Result<WsServerHandle, Box<dyn std::error::Error + Send + Sync>> {
     let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
     let listener = TcpListener::bind(addr).await?;
-    info!("WebSocket server listening on ws://{}", addr);
+    // With port 0 the OS assigns one, so read back what we actually got.
+    let bound_port = listener.local_addr()?.port();
+    info!("WebSocket server listening on ws://127.0.0.1:{}", bound_port);
 
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, _) = broadcast::channel::<AgentMessage>(64);
@@ -124,6 +129,7 @@ pub async fn start_server(config: WsServerConfig) -> Result<WsServerHandle, Box<
         shutdown_tx,
         command_rx,
         event_tx,
+        port: bound_port,
     })
 }
 
@@ -417,6 +423,25 @@ fn from_hex(hi: u8, lo: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Binding port 0 lets the OS pick a free port. The handle must report
+    /// which one, so callers never have to probe for a port and then race
+    /// another process to bind it.
+    #[tokio::test]
+    async fn port_zero_binds_and_reports_the_actual_port() {
+        let config = WsServerConfig {
+            port: 0,
+            origin_policy: OriginPolicy::AllowAll,
+            auth_token: None,
+        };
+
+        let handle = start_server(config).await.expect("server starts on port 0");
+
+        assert_ne!(handle.port, 0, "handle must report the OS-assigned port");
+        tokio::net::TcpStream::connect(("127.0.0.1", handle.port))
+            .await
+            .expect("reported port should be connectable");
+    }
 
     #[test]
     fn parse_token_basic() {

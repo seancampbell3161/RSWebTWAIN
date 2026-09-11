@@ -3,6 +3,7 @@
 //! Defines the `Scanner` trait and the `ScanOrchestrator` which tries native 64-bit
 //! TWAIN first and falls back to the 32-bit sidecar if no sources are found.
 
+pub mod raw;
 pub mod sidecar;
 pub mod twain;
 pub mod twain_ffi;
@@ -46,32 +47,48 @@ pub struct PageData {
     pub bits_per_pixel: u16,
     pub dpi_x: f32,
     pub dpi_y: f32,
+    /// Stride of `raw_data` in bytes, as reported by the source. Sources
+    /// commonly pad rows to a 4-byte boundary, so this is >= the packed row.
+    pub bytes_per_row: u32,
     pub raw_data: Vec<u8>,
 }
 
 impl PageData {
-    /// Convert raw bitmap data to PNG bytes
-    pub fn to_png(&self) -> Result<Vec<u8>, ScanError> {
-        use image::ImageEncoder;
+    /// Tightly-packed 8-bit-per-sample pixels, with source row padding removed
+    /// and 1bpp black-and-white expanded to 8bpp grayscale.
+    fn pixels(&self) -> Result<(Vec<u8>, image::ExtendedColorType), ScanError> {
+        let data = raw::normalize(
+            &self.raw_data,
+            self.width,
+            self.height,
+            self.bits_per_pixel,
+            self.bytes_per_row,
+        )?;
 
         let color_type = match self.bits_per_pixel {
             1 | 8 => image::ExtendedColorType::L8,
             24 => image::ExtendedColorType::Rgb8,
             32 => image::ExtendedColorType::Rgba8,
-            _ => {
+            other => {
                 return Err(ScanError::ImageConversion(format!(
                     "Unsupported bit depth: {}",
-                    self.bits_per_pixel
+                    other
                 )))
             }
         };
 
-        let mut buf = Vec::new();
-        let cursor = std::io::Cursor::new(&mut buf);
+        Ok((data, color_type))
+    }
 
-        let encoder = image::codecs::png::PngEncoder::new(cursor);
-        encoder
-            .write_image(&self.raw_data, self.width, self.height, color_type)
+    /// Convert raw bitmap data to PNG bytes
+    pub fn to_png(&self) -> Result<Vec<u8>, ScanError> {
+        use image::ImageEncoder;
+
+        let (data, color_type) = self.pixels()?;
+
+        let mut buf = Vec::new();
+        image::codecs::png::PngEncoder::new(std::io::Cursor::new(&mut buf))
+            .write_image(&data, self.width, self.height, color_type)
             .map_err(|e: image::ImageError| ScanError::ImageConversion(e.to_string()))?;
 
         Ok(buf)
@@ -81,23 +98,18 @@ impl PageData {
     pub fn to_jpeg(&self, quality: u8) -> Result<Vec<u8>, ScanError> {
         use image::ImageEncoder;
 
-        let color_type = match self.bits_per_pixel {
-            8 => image::ExtendedColorType::L8,
-            24 => image::ExtendedColorType::Rgb8,
-            _ => {
-                return Err(ScanError::ImageConversion(format!(
-                    "JPEG unsupported for {} bpp",
-                    self.bits_per_pixel
-                )))
-            }
-        };
+        let (data, color_type) = self.pixels()?;
+
+        // JPEG carries no alpha channel.
+        if matches!(color_type, image::ExtendedColorType::Rgba8) {
+            return Err(ScanError::ImageConversion(
+                "JPEG unsupported for 32 bpp".to_string(),
+            ));
+        }
 
         let mut buf = Vec::new();
-        let cursor = std::io::Cursor::new(&mut buf);
-
-        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(cursor, quality);
-        encoder
-            .write_image(&self.raw_data, self.width, self.height, color_type)
+        image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut buf), quality)
+            .write_image(&data, self.width, self.height, color_type)
             .map_err(|e: image::ImageError| ScanError::ImageConversion(e.to_string()))?;
 
         Ok(buf)
@@ -317,6 +329,7 @@ pub async fn execute_native_scan(
                                 bits_per_pixel: page.bits_per_pixel,
                                 dpi_x: page.x_resolution,
                                 dpi_y: page.y_resolution,
+                                bytes_per_row: page.bytes_per_row,
                                 raw_data: page.data,
                             };
                             let _ = page_tx.blocking_send(page_data);
@@ -331,6 +344,7 @@ pub async fn execute_native_scan(
                                 bits_per_pixel: page.bits_per_pixel,
                                 dpi_x: page.x_resolution,
                                 dpi_y: page.y_resolution,
+                                bytes_per_row: page.bytes_per_row,
                                 raw_data: page.data,
                             };
                             let _ = page_tx.blocking_send(page_data);
@@ -545,6 +559,7 @@ pub async fn execute_sidecar_scan(
                     width,
                     height,
                     bits_per_pixel,
+                    bytes_per_row,
                     data,
                 }) => {
                     // Decode base64 to raw bytes
@@ -563,6 +578,7 @@ pub async fn execute_sidecar_scan(
                         bits_per_pixel,
                         dpi_x: resolution as f32,
                         dpi_y: resolution as f32,
+                        bytes_per_row,
                         raw_data,
                     };
                     let _ = page_tx.blocking_send(page_data);
@@ -717,4 +733,58 @@ fn is_sidecar_terminal(resp: &sidecar::SidecarResponse) -> bool {
             | sidecar::SidecarResponse::Error { .. }
             | sidecar::SidecarResponse::Shutdown
     )
+}
+
+#[cfg(test)]
+mod page_data_tests {
+    use super::PageData;
+
+    fn padded_24bpp_page(width: u32, height: u32, stride: u32) -> PageData {
+        PageData {
+            page_number: 1,
+            width,
+            height,
+            bits_per_pixel: 24,
+            dpi_x: 300.0,
+            dpi_y: 300.0,
+            bytes_per_row: stride,
+            raw_data: vec![0x40; stride as usize * height as usize],
+        }
+    }
+
+    #[test]
+    fn to_png_handles_dword_padded_rows() {
+        // 2550px @ 24bpp is a 7650-byte row, padded to 7652 by most sources.
+        let page = padded_24bpp_page(2550, 4, 7652);
+        assert!(page.to_png().is_ok());
+    }
+
+    #[test]
+    fn to_jpeg_handles_dword_padded_rows() {
+        let page = padded_24bpp_page(2550, 4, 7652);
+        assert!(page.to_jpeg(85).is_ok());
+    }
+
+    #[test]
+    fn to_png_converts_1bpp_black_and_white() {
+        let page = PageData {
+            page_number: 1,
+            width: 16,
+            height: 2,
+            bits_per_pixel: 1,
+            dpi_x: 300.0,
+            dpi_y: 300.0,
+            bytes_per_row: 4,
+            raw_data: vec![0b1010_1010, 0b1100_1100, 0xAA, 0xAA,
+                           0b1111_0000, 0b0000_1111, 0xAA, 0xAA],
+        };
+        assert!(page.to_png().is_ok());
+    }
+
+    #[test]
+    fn to_png_reports_error_rather_than_panicking_on_truncated_data() {
+        let mut page = padded_24bpp_page(2550, 4, 7652);
+        page.raw_data.truncate(100);
+        assert!(page.to_png().is_err());
+    }
 }

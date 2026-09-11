@@ -70,6 +70,7 @@ pub(crate) enum SidecarResponse {
         width: u32,
         height: u32,
         bits_per_pixel: u16,
+        bytes_per_row: u32,
         data: String,
     },
     ScanComplete {

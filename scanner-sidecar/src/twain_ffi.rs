@@ -371,6 +371,7 @@ pub const CAP_DUPLEX: TW_UINT16 = 0x1012;
 pub const CAP_DUPLEXENABLED: TW_UINT16 = 0x1013;
 
 pub const ICAP_COMPRESSION: TW_UINT16 = 0x0100;
+pub const ICAP_PIXELFLAVOR: TW_UINT16 = 0x0103;
 pub const ICAP_PIXELTYPE: TW_UINT16 = 0x0101;
 pub const ICAP_UNITS: TW_UINT16 = 0x0102;
 pub const ICAP_XFERMECH: TW_UINT16 = 0x0103;
@@ -381,6 +382,10 @@ pub const ICAP_YRESOLUTION: TW_UINT16 = 0x1119;
 // Constants: Pixel Types (TWPT_*)
 
 pub const TWPT_BW: TW_UINT16 = 0;
+/// Pixel flavour: a 0 value is the darkest (black).
+pub const TWPF_CHOCOLATE: TW_UINT16 = 0;
+/// Pixel flavour: a 0 value is the lightest (white).
+pub const TWPF_VANILLA: TW_UINT16 = 1;
 pub const TWPT_GRAY: TW_UINT16 = 1;
 pub const TWPT_RGB: TW_UINT16 = 2;
 pub const TWPT_PALETTE: TW_UINT16 = 3;
