@@ -3479,7 +3479,7 @@ dependencies = [
 name = "scan-agent"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "futures-util",
  "image",
  "libloading 0.8.9",
@@ -3508,7 +3508,7 @@ dependencies = [
 name = "scanner-sidecar"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "libloading 0.8.9",
  "serde",
  "serde_json",
